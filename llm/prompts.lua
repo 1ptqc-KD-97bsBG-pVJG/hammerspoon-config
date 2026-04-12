@@ -33,27 +33,48 @@ local function renderContext(context)
   return table.concat(lines, "\n")
 end
 
+local function renderClipboardBlock(context)
+  return table.concat({
+    "<clipboard>",
+    context.clipboard or "",
+    "</clipboard>",
+  }, "\n")
+end
+
 function M.new(config)
   local self = {}
 
   function self.buildSummaryPrompt(context)
     return {
-      system = "You are a concise local assistant. Summarize the clipboard content in at most 3 short bullets.",
+      system = table.concat({
+        "You are a concise local assistant.",
+        "Return only the final answer.",
+        "Do not describe your reasoning.",
+        "Do not mention the metadata block unless it is directly relevant.",
+        "Summarize only the clipboard content in at most 3 short bullets.",
+      }, "\n"),
       user = string.format(
-        "%s\n\nClipboard:\n%s",
+        "Context metadata:\n%s\n\nSummarize only the clipboard content between the tags below.\n\n%s",
         renderContext(context),
-        context.clipboard
+        renderClipboardBlock(context)
       ),
     }
   end
 
   function self.buildRewritePrompt(context)
     return {
-      system = "Rewrite the clipboard text tersely. Preserve meaning, remove fluff, and return plain text only.",
+      system = table.concat({
+        "Rewrite the clipboard text tersely.",
+        "Preserve meaning and remove fluff.",
+        "Return plain text only.",
+        "Return only the rewritten clipboard text.",
+        "Do not include analysis, steps, bullets, labels, or commentary.",
+        "Do not rewrite the metadata block.",
+      }, "\n"),
       user = string.format(
-        "%s\n\nClipboard:\n%s",
+        "Context metadata:\n%s\n\nRewrite only the clipboard content between the tags below.\n\n%s",
         renderContext(context),
-        context.clipboard
+        renderClipboardBlock(context)
       ),
     }
   end
@@ -62,15 +83,17 @@ function M.new(config)
     return {
       system = table.concat({
         "You are diagnosing an error, log, or code issue.",
-        "Return three sections in plain text:",
+        "Focus on the clipboard content only.",
+        "Return only the final answer in plain text with these three sections:",
         "1. Root cause",
         "2. Immediate fix",
         "3. What to check next",
+        "Do not include your reasoning process.",
       }, "\n"),
       user = string.format(
-        "%s\n\nClipboard:\n%s",
+        "Context metadata:\n%s\n\nAnalyze only the clipboard content between the tags below.\n\n%s",
         renderContext(context),
-        context.clipboard
+        renderClipboardBlock(context)
       ),
     }
   end

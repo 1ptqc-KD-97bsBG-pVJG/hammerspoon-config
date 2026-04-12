@@ -30,6 +30,19 @@ local function contains(list, target)
   return false
 end
 
+local function appendUnique(list, value)
+  local updated = {}
+  for _, item in ipairs(list or {}) do
+    table.insert(updated, item)
+  end
+
+  if not contains(updated, value) then
+    table.insert(updated, value)
+  end
+
+  return updated
+end
+
 local function listModelIds(payload)
   if type(payload) ~= "table" then
     return {}
@@ -55,6 +68,33 @@ local function listModelIds(payload)
   return ids
 end
 
+local function hasNativeLoadMetadata(payload)
+  if type(payload) ~= "table" then
+    return false
+  end
+
+  local source = payload.data or payload.models or payload
+  if type(source) ~= "table" then
+    return false
+  end
+
+  for _, item in ipairs(source) do
+    if type(item) == "table" then
+      if item.loaded ~= nil
+        or item.is_loaded ~= nil
+        or item.state ~= nil
+        or item.status ~= nil
+        or item.active ~= nil
+        or item.current ~= nil
+      then
+        return true
+      end
+    end
+  end
+
+  return false
+end
+
 local function listLoadedNativeModels(payload)
   if type(payload) ~= "table" then
     return {}
@@ -72,6 +112,8 @@ local function listLoadedNativeModels(payload)
         or item.is_loaded == true
         or item.state == "loaded"
         or item.status == "loaded"
+        or item.active == true
+        or item.current == true
       if loaded then
         local identifier = item.id or item.model or item.identifier
         if identifier then
@@ -144,14 +186,28 @@ function M.new(config, client)
     return contains(state.available_models, modelId)
   end
 
+  function self.canAutoLoadRole(role)
+    if role == "fast" then
+      return config.backend.auto_load_fast_model
+    end
+
+    return config.backend.auto_load_non_fast_models
+  end
+
   function self.refreshStatus(callback)
     client.listNativeModels(function(nativeResult)
       if nativeResult.ok then
+        local explicitLoadedModels = listLoadedNativeModels(nativeResult.data)
+        local loadedModels = explicitLoadedModels
+        if not hasNativeLoadMetadata(nativeResult.data) and #state.loaded_models > 0 then
+          loadedModels = state.loaded_models
+        end
+
         applySnapshot({
           reachable = true,
           native_available = true,
           available_models = listModelIds(nativeResult.data),
-          loaded_models = listLoadedNativeModels(nativeResult.data),
+          loaded_models = loadedModels,
           last_checked_at = isoNow(),
           last_error = nil,
           last_status_source = "native",
@@ -213,6 +269,19 @@ function M.new(config, client)
       return
     end
 
+    if not self.canAutoLoadRole(role) then
+      callback({
+        ok = true,
+        data = {
+          model = modelId,
+          loaded = false,
+          skipped = true,
+          reason = "auto_load_disabled_for_role",
+        },
+      })
+      return
+    end
+
     if not state.native_available then
       callback({
         ok = true,
@@ -240,6 +309,11 @@ function M.new(config, client)
         callback(loadResult)
         return
       end
+
+      applySnapshot({
+        loaded_models = appendUnique(state.loaded_models, modelId),
+        last_error = nil,
+      })
 
       self.refreshStatus(function(refreshResult)
         if refreshResult and refreshResult.ok then

@@ -10,12 +10,15 @@ local M = {
     request_timeout_ms = 20000,
     status_timeout_ms = 1500,
     enable_native_model_management = true,
+    auto_load_fast_model = true,
+    auto_load_non_fast_models = false,
   },
   models = {
-    fast = "zai-org/glm-4.7-flash",
+    fast = "openai/gpt-oss-20b",
     reason = "qwen3.5-122b-a10b",
     code = "qwen/qwen3-coder-next",
     vision = "qwen/qwen3-vl-8b",
+    background = "zai-org/glm-4.7-flash",
   },
   ui = {
     modifier = { "cmd", "alt", "ctrl" },
@@ -150,6 +153,14 @@ function M.validate()
 
   if type(M.backend.status_timeout_ms) ~= "number" or M.backend.status_timeout_ms <= 0 then
     return false, "backend.status_timeout_ms must be a positive number"
+  end
+
+  if type(M.backend.auto_load_fast_model) ~= "boolean" then
+    return false, "backend.auto_load_fast_model must be a boolean"
+  end
+
+  if type(M.backend.auto_load_non_fast_models) ~= "boolean" then
+    return false, "backend.auto_load_non_fast_models must be a boolean"
   end
 
   if type(M.limits.instant_clipboard_chars) ~= "number" or M.limits.instant_clipboard_chars <= 0 then

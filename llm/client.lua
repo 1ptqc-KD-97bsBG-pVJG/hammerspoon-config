@@ -239,20 +239,63 @@ function M.new(config)
   end
 
   function self.loadModel(modelId, callback)
-    self.requestJson({
-      url = config.backend.native_base .. "/models/load",
-      method = "POST",
-      payload = {
-        model = modelId,
-        identifier = modelId,
-      },
-      timeout_ms = config.backend.request_timeout_ms,
-    }, callback)
+    local payloads = {
+      { model = modelId },
+      { id = modelId },
+      { identifier = modelId },
+    }
+
+    local function tryPayload(index)
+      local payload = payloads[index]
+      if not payload then
+        callback(normalizeFailure(
+          "model_load_failed",
+          "Failed to load model with available payload formats",
+          modelId
+        ))
+        return
+      end
+
+      self.requestJson({
+        url = config.backend.native_base .. "/models/load",
+        method = "POST",
+        payload = payload,
+        timeout_ms = config.backend.request_timeout_ms,
+      }, function(result)
+        if result.ok then
+          callback(result)
+          return
+        end
+
+        local detail = tostring(result.error and result.error.detail or "")
+        local message = tostring(result.error and result.error.message or "")
+        local combined = (message .. " " .. detail):lower()
+        local schemaMismatch = combined:find("unknown key") or combined:find("unknown field") or combined:find("invalid type")
+
+        if schemaMismatch then
+          tryPayload(index + 1)
+          return
+        end
+
+        callback(result)
+      end)
+    end
+
+    tryPayload(1)
   end
 
   function self.responsesRequest(payload, callback)
     self.requestJson({
       url = config.backend.openai_base .. "/responses",
+      method = "POST",
+      payload = payload,
+      timeout_ms = config.backend.request_timeout_ms,
+    }, callback)
+  end
+
+  function self.chatCompletionsRequest(payload, callback)
+    self.requestJson({
+      url = config.backend.openai_base .. "/chat/completions",
       method = "POST",
       payload = payload,
       timeout_ms = config.backend.request_timeout_ms,
@@ -285,6 +328,68 @@ function M.new(config)
         ok = true,
         data = {
           text = trim(text),
+          raw = result.data,
+        },
+      })
+    end)
+  end
+
+  function self.requestStructuredChatResponse(request, callback)
+    local payload = {
+      model = request.model,
+      messages = {
+        {
+          role = "system",
+          content = request.system,
+        },
+        {
+          role = "user",
+          content = request.user,
+        },
+      },
+      response_format = {
+        type = "json_schema",
+        json_schema = {
+          name = request.schema_name,
+          strict = true,
+          schema = request.schema,
+        },
+      },
+      temperature = request.temperature or 0,
+      stream = false,
+    }
+
+    if request.max_tokens then
+      payload.max_tokens = request.max_tokens
+    end
+
+    self.chatCompletionsRequest(payload, function(result)
+      if not result.ok then
+        callback(result)
+        return
+      end
+
+      local choices = result.data and result.data.choices
+      local firstChoice = type(choices) == "table" and choices[1] or nil
+      local message = firstChoice and firstChoice.message or nil
+      local content = message and message.content or nil
+
+      if type(content) ~= "string" or trim(content) == "" then
+        callback(normalizeFailure("empty_output", "The model response did not include structured content", result.data))
+        return
+      end
+
+      local ok, parsed = pcall(hs.json.decode, content)
+      if not ok or type(parsed) ~= "table" then
+        callback(normalizeFailure("json_decode_failed", "The model returned invalid JSON for structured output", content))
+        return
+      end
+
+      callback({
+        ok = true,
+        data = {
+          parsed = parsed,
+          raw_text = content,
           raw = result.data,
         },
       })

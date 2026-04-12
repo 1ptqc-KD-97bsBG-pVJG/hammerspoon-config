@@ -28,3 +28,4 @@ The user-facing model actions are not implemented yet in this checkpoint.
 - The eventual harness will talk to a local LM Studio server over HTTP.
 - Script drafting will save generated scripts locally for review rather than executing them automatically.
 - `config.local.lua` is intentionally untracked and should be used for any machine-specific paths, URLs, bundle IDs, or tokens.
+- The default policy now favors `openai/gpt-oss-20b` for clipboard actions and does not auto-load non-fast models unless you explicitly opt into that in `config.local.lua`.
