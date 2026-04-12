@@ -1,0 +1,8 @@
+.DS_Store
+config.local.lua
+*.log
+tmp/
+artifacts/
+runtime/
+.cache/
+.lua-language-server/
