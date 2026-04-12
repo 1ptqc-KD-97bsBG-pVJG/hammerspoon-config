@@ -1,4 +1,5 @@
 local M = {}
+local BROWSER_SEPARATOR = "\n|||HS|||\n"
 
 local BROWSER_ADAPTERS = {
   {
@@ -14,9 +15,7 @@ local BROWSER_ADAPTERS = {
         try
           set tabURL to URL of active tab of front window
         end try
-        return tabURL & "
-|||HS|||
-" & tabTitle
+        return tabURL & linefeed & "|||HS|||" & linefeed & tabTitle
       end tell
     ]],
   },
@@ -28,9 +27,7 @@ local BROWSER_ADAPTERS = {
         set currentTab to current tab of front window
         set tabURL to URL of currentTab
         set tabTitle to name of currentTab
-        return tabURL & "
-|||HS|||
-" & tabTitle
+        return tabURL & linefeed & "|||HS|||" & linefeed & tabTitle
       end tell
     ]],
   },
@@ -42,9 +39,7 @@ local BROWSER_ADAPTERS = {
         set currentTab to active tab of front window
         set tabURL to URL of currentTab
         set tabTitle to title of currentTab
-        return tabURL & "
-|||HS|||
-" & tabTitle
+        return tabURL & linefeed & "|||HS|||" & linefeed & tabTitle
       end tell
     ]],
   },
@@ -56,9 +51,7 @@ local BROWSER_ADAPTERS = {
         set currentTab to active tab of front window
         set tabURL to URL of currentTab
         set tabTitle to title of currentTab
-        return tabURL & "
-|||HS|||
-" & tabTitle
+        return tabURL & linefeed & "|||HS|||" & linefeed & tabTitle
       end tell
     ]],
   },
@@ -73,8 +66,7 @@ local function trim(value)
 end
 
 local function splitBrowserPayload(payload)
-  local separator = "\n|||HS|||\n"
-  local url, title = payload:match("^(.-)" .. separator .. "(.*)$")
+  local url, title = payload:match("^(.-)" .. BROWSER_SEPARATOR .. "(.*)$")
   return trim(url), trim(title)
 end
 
@@ -89,6 +81,45 @@ local function runAppleScript(script)
   end
 
   return result
+end
+
+local function orderedBrowserAdapters(config)
+  local ordered = {}
+  local primaryApp = config.ui.primary_browser_app
+
+  if primaryApp and primaryApp ~= "" then
+    for _, adapter in ipairs(BROWSER_ADAPTERS) do
+      if adapter.app == primaryApp then
+        table.insert(ordered, adapter)
+      end
+    end
+  end
+
+  for _, adapter in ipairs(BROWSER_ADAPTERS) do
+    if adapter.app ~= primaryApp then
+      table.insert(ordered, adapter)
+    end
+  end
+
+  return ordered
+end
+
+local function findBrowserAdapter(config, appName)
+  for _, adapter in ipairs(orderedBrowserAdapters(config)) do
+    if adapter.app == appName then
+      return adapter
+    end
+  end
+
+  return nil
+end
+
+local function truncateClipboard(text, limit, allowFullClipboard)
+  if allowFullClipboard or #text <= limit then
+    return text, false
+  end
+
+  return text:sub(1, limit), true
 end
 
 function M.new(config)
@@ -108,32 +139,44 @@ function M.new(config)
     return frontWindow and (frontWindow:title() or "") or ""
   end
 
+  function self.isSupportedBrowser(appName)
+    return findBrowserAdapter(config, appName) ~= nil
+  end
+
+  function self.supportedBrowserApps()
+    local apps = {}
+    for _, adapter in ipairs(orderedBrowserAdapters(config)) do
+      table.insert(apps, adapter.app)
+    end
+    return apps
+  end
+
   function self.getBrowserContext(appName)
     if not config.features.browser_context then
       return nil
     end
 
     local targetApp = appName or self.getFrontmostAppName()
-    for _, adapter in ipairs(BROWSER_ADAPTERS) do
-      if adapter.app == targetApp then
-        local payload = runAppleScript(adapter.script)
-        if not payload then
-          return nil
-        end
-
-        local url, title = splitBrowserPayload(payload)
-        if url == "" and title == "" then
-          return nil
-        end
-
-        return {
-          url = url ~= "" and url or nil,
-          page_title = title ~= "" and title or nil,
-        }
-      end
+    local adapter = findBrowserAdapter(config, targetApp)
+    if not adapter then
+      return nil
     end
 
-    return nil
+    local payload = runAppleScript(adapter.script)
+    if not payload then
+      return nil
+    end
+
+    local url, title = splitBrowserPayload(payload)
+    if url == "" and title == "" then
+      return nil
+    end
+
+    return {
+      url = url ~= "" and url or nil,
+      page_title = title ~= "" and title or nil,
+      browser_app = adapter.app,
+    }
   end
 
   function self.getFinderSelection()
@@ -149,7 +192,10 @@ function M.new(config)
         repeat with selectedItem in selectedItems
           set end of pathList to POSIX path of (selectedItem as alias)
         end repeat
-        return pathList as string
+        set AppleScript's text item delimiters to linefeed
+        set outputText to pathList as string
+        set AppleScript's text item delimiters to ""
+        return outputText
       end tell
     ]])
 
@@ -158,7 +204,7 @@ function M.new(config)
     end
 
     local items = {}
-    for path in result:gmatch("[^\r\n,]+") do
+    for path in result:gmatch("[^\r\n]+") do
       local trimmed = trim(path)
       if trimmed ~= "" then
         table.insert(items, trimmed)
@@ -172,16 +218,14 @@ function M.new(config)
     opts = opts or {}
 
     local appName = self.getFrontmostAppName()
-    local clipboard = self.getClipboardText()
-    local truncated = false
-
-    if not opts.allow_full_clipboard and #clipboard > config.limits.instant_clipboard_chars then
-      clipboard = clipboard:sub(1, config.limits.instant_clipboard_chars)
-      truncated = true
-    end
+    local clipboard, truncated = truncateClipboard(
+      self.getClipboardText(),
+      config.limits.instant_clipboard_chars,
+      opts.allow_full_clipboard
+    )
 
     local context = {
-      source = "clipboard",
+      source = opts.source or "clipboard",
       app = appName,
       window_title = self.getFrontWindowTitle(),
       url = nil,
@@ -192,7 +236,7 @@ function M.new(config)
       captured_at = isoNow(),
     }
 
-    if opts.include_browser then
+    if opts.include_browser and self.isSupportedBrowser(appName) then
       local browserContext = self.getBrowserContext(appName)
       if browserContext then
         context.url = browserContext.url
