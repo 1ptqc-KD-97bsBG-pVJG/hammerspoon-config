@@ -16,6 +16,10 @@ local function buildHeaders(config)
   return headers
 end
 
+local function trim(value)
+  return (value or ""):match("^%s*(.-)%s*$")
+end
+
 local function decodeJson(body)
   if body == nil or body == "" then
     return true, {}
@@ -54,20 +58,6 @@ local function normalizeFailure(code, message, detail)
       detail = detail,
     },
   }
-end
-
-local function buildPromptInput(systemPrompt, userPrompt)
-  local sections = {}
-
-  if systemPrompt and systemPrompt ~= "" then
-    table.insert(sections, "[System]\n" .. systemPrompt)
-  end
-
-  if userPrompt and userPrompt ~= "" then
-    table.insert(sections, "[User]\n" .. userPrompt)
-  end
-
-  return table.concat(sections, "\n\n")
 end
 
 local function extractTextFromResponse(decoded)
@@ -114,10 +104,53 @@ local function extractTextFromResponse(decoded)
       if type(firstChoice.message) == "table" and type(firstChoice.message.content) == "string" then
         return firstChoice.message.content
       end
+
+      if type(firstChoice.message) == "table" and type(firstChoice.message.content) == "table" then
+        local parts = {}
+        for _, contentItem in ipairs(firstChoice.message.content) do
+          if type(contentItem) == "table" and type(contentItem.text) == "string" then
+            table.insert(parts, contentItem.text)
+          end
+        end
+
+        if #parts > 0 then
+          return table.concat(parts, "\n")
+        end
+      end
     end
   end
 
   return nil
+end
+
+local function buildInputBlocks(systemPrompt, userPrompt)
+  local items = {}
+
+  if systemPrompt and systemPrompt ~= "" then
+    table.insert(items, {
+      role = "system",
+      content = {
+        {
+          type = "input_text",
+          text = systemPrompt,
+        },
+      },
+    })
+  end
+
+  if userPrompt and userPrompt ~= "" then
+    table.insert(items, {
+      role = "user",
+      content = {
+        {
+          type = "input_text",
+          text = userPrompt,
+        },
+      },
+    })
+  end
+
+  return items
 end
 
 function M.new(config)
@@ -181,50 +214,55 @@ function M.new(config)
 
   local self = {}
 
+  function self.normalizeFailure(code, message, detail)
+    return normalizeFailure(code, message, detail)
+  end
+
+  function self.requestJson(args, callback)
+    jsonRequest(args.url, args.method, args.payload, args.timeout_ms, callback)
+  end
+
   function self.listModels(callback)
-    jsonRequest(
-      config.backend.openai_base .. "/models",
-      "GET",
-      nil,
-      config.backend.status_timeout_ms,
-      callback
-    )
+    self.requestJson({
+      url = config.backend.openai_base .. "/models",
+      method = "GET",
+      timeout_ms = config.backend.status_timeout_ms,
+    }, callback)
   end
 
   function self.listNativeModels(callback)
-    jsonRequest(
-      config.backend.native_base .. "/models",
-      "GET",
-      nil,
-      config.backend.status_timeout_ms,
-      callback
-    )
+    self.requestJson({
+      url = config.backend.native_base .. "/models",
+      method = "GET",
+      timeout_ms = config.backend.status_timeout_ms,
+    }, callback)
   end
 
   function self.loadModel(modelId, callback)
-    jsonRequest(
-      config.backend.native_base .. "/models/load",
-      "POST",
-      { model = modelId },
-      config.backend.request_timeout_ms,
-      callback
-    )
+    self.requestJson({
+      url = config.backend.native_base .. "/models/load",
+      method = "POST",
+      payload = {
+        model = modelId,
+        identifier = modelId,
+      },
+      timeout_ms = config.backend.request_timeout_ms,
+    }, callback)
   end
 
   function self.responsesRequest(payload, callback)
-    jsonRequest(
-      config.backend.openai_base .. "/responses",
-      "POST",
-      payload,
-      config.backend.request_timeout_ms,
-      callback
-    )
+    self.requestJson({
+      url = config.backend.openai_base .. "/responses",
+      method = "POST",
+      payload = payload,
+      timeout_ms = config.backend.request_timeout_ms,
+    }, callback)
   end
 
   function self.requestTextResponse(request, callback)
     local payload = {
       model = request.model,
-      input = buildPromptInput(request.system, request.user),
+      input = buildInputBlocks(request.system, request.user),
     }
 
     if request.max_output_tokens then
@@ -246,7 +284,7 @@ function M.new(config)
       callback({
         ok = true,
         data = {
-          text = text,
+          text = trim(text),
           raw = result.data,
         },
       })

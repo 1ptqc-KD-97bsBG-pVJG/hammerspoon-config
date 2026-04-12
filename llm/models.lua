@@ -25,6 +25,8 @@ local ACTION_ROLE_MAP = {
   rewriteClipboardTersely = "fast",
   explainClipboardError = "fast",
   draftUtilityScript = "code",
+  sendToOpenWebUI = "fast",
+  saveClipboardSummary = "fast",
 }
 
 local function trim(value)
@@ -80,13 +82,26 @@ function M.new(config)
   function self.resolveModelForAction(actionName, text)
     local role = self.resolveRoleForAction(actionName, text)
     return {
+      action = actionName,
       role = role,
       model = self.resolveModelForRole(role),
+      is_code_like = self.looksLikeCodeOrLog(text),
     }
   end
 
   function self.requiresColdStartWarning(modelId, role)
     return role ~= "fast" and modelId ~= config.models.fast
+  end
+
+  function self.describeSelection(actionName, text)
+    local resolved = self.resolveModelForAction(actionName, text)
+    local summary = string.format("%s -> %s (%s)", actionName, resolved.model, resolved.role)
+    if actionName == "explainClipboardError" and resolved.role == "code" then
+      summary = summary .. " [code/log heuristic]"
+    end
+
+    resolved.summary = summary
+    return resolved
   end
 
   function self.isFastModel(modelId)
