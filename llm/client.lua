@@ -20,6 +20,57 @@ local function trim(value)
   return (value or ""):match("^%s*(.-)%s*$")
 end
 
+local function isGptOssModel(modelId)
+  local lowered = tostring(modelId or ""):lower()
+  return lowered:find("gpt%-oss", 1, false) ~= nil
+end
+
+local function buildStopSequences(modelId)
+  if isGptOssModel(modelId) then
+    return { "<|end|>" }
+  end
+
+  return nil
+end
+
+local function extractFirstJsonObject(text)
+  if type(text) ~= "string" then
+    return nil
+  end
+
+  local startPos = text:find("{", 1, true)
+  if not startPos then
+    return nil
+  end
+
+  local depth = 0
+  local inString = false
+  local escaped = false
+
+  for index = startPos, #text do
+    local ch = text:sub(index, index)
+
+    if escaped then
+      escaped = false
+    elseif ch == "\\" then
+      escaped = true
+    elseif ch == '"' then
+      inString = not inString
+    elseif not inString then
+      if ch == "{" then
+        depth = depth + 1
+      elseif ch == "}" then
+        depth = depth - 1
+        if depth == 0 then
+          return text:sub(startPos, index)
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
 local function decodeJson(body)
   if body == nil or body == "" then
     return true, {}
@@ -284,6 +335,52 @@ function M.new(config)
     tryPayload(1)
   end
 
+  function self.unloadModel(modelId, callback)
+    local payloads = {
+      { model = modelId },
+      { id = modelId },
+      { identifier = modelId },
+    }
+
+    local function tryPayload(index)
+      local payload = payloads[index]
+      if not payload then
+        callback(normalizeFailure(
+          "model_unload_failed",
+          "Failed to unload model with available payload formats",
+          modelId
+        ))
+        return
+      end
+
+      self.requestJson({
+        url = config.backend.native_base .. "/models/unload",
+        method = "POST",
+        payload = payload,
+        timeout_ms = config.backend.request_timeout_ms,
+      }, function(result)
+        if result.ok then
+          callback(result)
+          return
+        end
+
+        local detail = tostring(result.error and result.error.detail or "")
+        local message = tostring(result.error and result.error.message or "")
+        local combined = (message .. " " .. detail):lower()
+        local schemaMismatch = combined:find("unknown key") or combined:find("unknown field") or combined:find("invalid type")
+
+        if schemaMismatch then
+          tryPayload(index + 1)
+          return
+        end
+
+        callback(result)
+      end)
+    end
+
+    tryPayload(1)
+  end
+
   function self.responsesRequest(payload, callback)
     self.requestJson({
       url = config.backend.openai_base .. "/responses",
@@ -363,6 +460,11 @@ function M.new(config)
       payload.max_tokens = request.max_tokens
     end
 
+    local stopSequences = request.stop or buildStopSequences(request.model)
+    if stopSequences then
+      payload.stop = stopSequences
+    end
+
     self.chatCompletionsRequest(payload, function(result)
       if not result.ok then
         callback(result)
@@ -381,6 +483,15 @@ function M.new(config)
       end
 
       local ok, parsed = pcall(hs.json.decode, content)
+      local decodedText = content
+      if (not ok or type(parsed) ~= "table") and type(content) == "string" then
+        local extracted = extractFirstJsonObject(content)
+        if extracted and extracted ~= "" then
+          decodedText = extracted
+          ok, parsed = pcall(hs.json.decode, extracted)
+        end
+      end
+
       if not ok or type(parsed) ~= "table" then
         callback(normalizeFailure("json_decode_failed", "The model returned invalid JSON for structured output", content))
         return
@@ -390,7 +501,7 @@ function M.new(config)
         ok = true,
         data = {
           parsed = parsed,
-          raw_text = content,
+          raw_text = decodedText,
           finish_reason = finishReason,
           raw = result.data,
         },

@@ -245,6 +245,13 @@ function M.new(deps)
     return #text < 24
   end
 
+  local function containsErrorSections(value)
+    local text = trim(value or ""):lower()
+    return text:find("root cause", 1, true)
+      and text:find("immediate fix", 1, true)
+      and text:find("what to check next", 1, true)
+  end
+
   local function isBadStructuredOutput(spec, resultData, normalized, payloadContext)
     local text = trim(normalized or "")
     if text == "" then
@@ -261,12 +268,10 @@ function M.new(deps)
     end
 
     if spec.action_name == "explainClipboardError" then
-      return looksCorrupted(parsed.root_cause or "")
-        or looksCorrupted(parsed.immediate_fix or "")
-        or looksCorrupted(parsed.next_checks or "")
-        or looksLikeIncompleteErrorField(parsed.root_cause or "")
-        or looksLikeIncompleteErrorField(parsed.immediate_fix or "")
-        or looksLikeIncompleteErrorField(parsed.next_checks or "")
+      local answer = parsed.text or text
+      return not containsErrorSections(answer)
+        or looksCorrupted(answer)
+        or looksLikeIncompleteErrorField(answer)
         or finishReason == "length"
     end
 
@@ -541,27 +546,16 @@ function M.new(deps)
         return {
           type = "object",
           properties = {
-            root_cause = { type = "string", minLength = minLength },
-            immediate_fix = { type = "string", minLength = minLength },
-            next_checks = { type = "string", minLength = minLength },
+            text = { type = "string", minLength = minLength * 3 },
           },
-          required = { "root_cause", "immediate_fix", "next_checks" },
+          required = { "text" },
           additionalProperties = false,
         }
       end,
       build_prompt = prompts.buildErrorExplainPrompt,
       build_retry_prompt = prompts.buildErrorExplainRetryPrompt,
       normalize_result = function(parsed)
-        return table.concat({
-          "Root cause",
-          trim(parsed.root_cause or ""),
-          "",
-          "Immediate fix",
-          trim(parsed.immediate_fix or ""),
-          "",
-          "What to check next",
-          trim(parsed.next_checks or ""),
-        }, "\n")
+        return trim(parsed.text or "")
       end,
       handle_success = function(text, payloadContext, modelSelection)
         copyResult(text)

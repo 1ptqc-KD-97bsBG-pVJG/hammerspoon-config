@@ -43,6 +43,16 @@ local function appendUnique(list, value)
   return updated
 end
 
+local function removeValues(list, removals)
+  local updated = {}
+  for _, item in ipairs(list or {}) do
+    if not contains(removals, item) then
+      table.insert(updated, item)
+    end
+  end
+  return updated
+end
+
 local function listModelIds(payload)
   if type(payload) ~= "table" then
     return {}
@@ -255,6 +265,60 @@ function M.new(config, client)
     end)
   end
 
+  local function unloadModels(modelIds, callback)
+    if type(modelIds) ~= "table" or #modelIds == 0 then
+      callback({ ok = true, data = { unloaded = {} } })
+      return
+    end
+
+    local index = 1
+    local unloaded = {}
+
+    local function unloadNext()
+      local modelId = modelIds[index]
+      if not modelId then
+        applySnapshot({
+          loaded_models = removeValues(state.loaded_models, unloaded),
+          last_error = nil,
+        })
+        callback({ ok = true, data = { unloaded = unloaded } })
+        return
+      end
+
+      client.unloadModel(modelId, function(result)
+        if not result.ok then
+          local detail = tostring(result.error and result.error.detail or "")
+          local message = tostring(result.error and result.error.message or "")
+          local combined = (message .. " " .. detail):lower()
+          if combined:find("404", 1, true)
+            or combined:find("not found", 1, true)
+            or combined:find("unknown route", 1, true)
+            or combined:find("method not allowed", 1, true)
+          then
+            callback({
+              ok = false,
+              error = {
+                code = "native_unload_unavailable",
+                message = "Native unload endpoint is unavailable",
+                detail = combined,
+              },
+            })
+            return
+          end
+
+          callback(result)
+          return
+        end
+
+        table.insert(unloaded, modelId)
+        index = index + 1
+        unloadNext()
+      end)
+    end
+
+    unloadNext()
+  end
+
   local function continueEnsureModelReady(modelId, role, opts, callback)
     if not config.backend.enable_native_model_management then
       callback({
@@ -300,30 +364,46 @@ function M.new(config, client)
       return
     end
 
-    if opts.onWarning and role ~= "fast" then
-      opts.onWarning(modelId, role)
-    end
-
-    client.loadModel(modelId, function(loadResult)
-      if not loadResult.ok then
-        callback(loadResult)
-        return
+    local function proceedToLoad()
+      if opts.onWarning and role ~= "fast" then
+        opts.onWarning(modelId, role)
       end
 
-      applySnapshot({
-        loaded_models = appendUnique(state.loaded_models, modelId),
-        last_error = nil,
-      })
-
-      self.refreshStatus(function(refreshResult)
-        if refreshResult and refreshResult.ok then
-          callback({ ok = true, data = { model = modelId, loaded = true, refreshed = true } })
+      client.loadModel(modelId, function(loadResult)
+        if not loadResult.ok then
+          callback(loadResult)
           return
         end
 
-        callback({ ok = true, data = { model = modelId, loaded = true, refresh_failed = true } })
+        applySnapshot({
+          loaded_models = appendUnique(state.loaded_models, modelId),
+          last_error = nil,
+        })
+
+        self.refreshStatus(function(refreshResult)
+          if refreshResult and refreshResult.ok then
+            callback({ ok = true, data = { model = modelId, loaded = true, refreshed = true } })
+            return
+          end
+
+          callback({ ok = true, data = { model = modelId, loaded = true, refresh_failed = true } })
+        end)
       end)
-    end)
+    end
+
+    if config.backend.unload_other_models_before_load and #state.loaded_models > 0 then
+      unloadModels(state.loaded_models, function(unloadResult)
+        if not unloadResult.ok then
+          callback(unloadResult)
+          return
+        end
+
+        proceedToLoad()
+      end)
+      return
+    end
+
+    proceedToLoad()
   end
 
   function self.ensureModelReady(modelId, role, opts, callback)

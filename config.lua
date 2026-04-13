@@ -7,11 +7,12 @@ local M = {
     openai_base = "http://localhost:1234/v1",
     native_base = "http://localhost:1234/api/v1",
     api_token_env = "LM_STUDIO_API_TOKEN",
-    request_timeout_ms = 20000,
+    request_timeout_ms = 45000,
     status_timeout_ms = 1500,
     enable_native_model_management = true,
     auto_load_fast_model = true,
     auto_load_non_fast_models = false,
+    unload_other_models_before_load = true,
   },
   models = {
     fast = "openai/gpt-oss-20b",
@@ -161,6 +162,10 @@ function M.validate()
 
   if type(M.backend.auto_load_non_fast_models) ~= "boolean" then
     return false, "backend.auto_load_non_fast_models must be a boolean"
+  end
+
+  if type(M.backend.unload_other_models_before_load) ~= "boolean" then
+    return false, "backend.unload_other_models_before_load must be a boolean"
   end
 
   if type(M.limits.instant_clipboard_chars) ~= "number" or M.limits.instant_clipboard_chars <= 0 then
