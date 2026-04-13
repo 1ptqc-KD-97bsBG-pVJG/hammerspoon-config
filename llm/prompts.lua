@@ -65,14 +65,36 @@ function M.new(config)
     return {
       system = table.concat({
         "Rewrite the clipboard text tersely.",
-        "Preserve meaning and remove fluff.",
+        "This is a rewrite, not a summary.",
+        "Preserve meaning, keep every material point, and remove fluff.",
         "Return plain text only.",
         "Return only the rewritten clipboard text.",
         "Do not include analysis, steps, bullets, labels, or commentary.",
+        "Do not use ellipses, placeholders, or short fragment stubs.",
         "Do not rewrite the metadata block.",
       }, "\n"),
       user = string.format(
         "Context metadata:\n%s\n\nRewrite only the clipboard content between the tags below.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
+  function self.buildRewriteRetryPrompt(context)
+    return {
+      system = table.concat({
+        "Rewrite the clipboard text tersely.",
+        "This is a rewrite, not a summary.",
+        "Keep every material claim, but express it more tightly.",
+        "Return plain text only.",
+        "Return only the rewritten clipboard text.",
+        "Do not include analysis, labels, bullets, commentary, placeholders, or ellipses.",
+        "Do not shorten the answer to a heading or opening fragment.",
+        "Do not rewrite the metadata block.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nYour previous attempt was too short or incomplete. Rewrite the full clipboard content between the tags below, keeping all important points.\n\n%s",
         renderContext(context),
         renderClipboardBlock(context)
       ),
@@ -88,10 +110,33 @@ function M.new(config)
         "1. Root cause",
         "2. Immediate fix",
         "3. What to check next",
+        "Each section must contain at least one complete sentence.",
+        "Do not use ellipses, placeholders, or fragments.",
         "Do not include your reasoning process.",
       }, "\n"),
       user = string.format(
         "Context metadata:\n%s\n\nAnalyze only the clipboard content between the tags below.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
+  function self.buildErrorExplainRetryPrompt(context)
+    return {
+      system = table.concat({
+        "You are diagnosing an error, log, or code issue.",
+        "Focus on the clipboard content only.",
+        "Return only the final answer in plain text with these three sections:",
+        "1. Root cause",
+        "2. Immediate fix",
+        "3. What to check next",
+        "Each section must contain one to three complete sentences.",
+        "Do not use ellipses, placeholders, or fragments.",
+        "Do not include your reasoning process.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nYour previous attempt was incomplete. Analyze only the clipboard content between the tags below and provide a complete answer for all three sections.\n\n%s",
         renderContext(context),
         renderClipboardBlock(context)
       ),

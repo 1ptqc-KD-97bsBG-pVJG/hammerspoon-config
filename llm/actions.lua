@@ -40,6 +40,38 @@ local function punctuationDensity(value)
   return punct / total
 end
 
+local function collapseWhitespace(value)
+  return trim((value or ""):gsub("[%s\194\160]+", " "))
+end
+
+local function lineCount(value)
+  local text = trim(value or "")
+  if text == "" then
+    return 0
+  end
+
+  local count = 1
+  for _ in text:gmatch("\n") do
+    count = count + 1
+  end
+
+  return count
+end
+
+local function sentenceishCount(value)
+  local text = trim(value or "")
+  if text == "" then
+    return 0
+  end
+
+  local count = 0
+  for _ in text:gmatch("[%.%!%?;:\n]") do
+    count = count + 1
+  end
+
+  return math.max(1, count)
+end
+
 function M.new(deps)
   local config = deps.config
   local client = deps.client
@@ -136,26 +168,51 @@ function M.new(deps)
   end
 
   local function seemsTriviallyShortForRewrite(inputText, outputText)
-    local inputLength = #(trim(inputText or ""))
-    local outputLength = #(trim(outputText or ""))
+    local inputLength = #collapseWhitespace(inputText)
+    local outputLength = #collapseWhitespace(outputText)
 
-    if inputLength < 140 then
+    if inputLength < 220 then
       return false
     end
 
-    return outputLength > 0 and outputLength < math.max(24, math.floor(inputLength * 0.16))
-  end
-
-  local function looksLikePlaceholder(value)
-    local text = trim(value or ""):lower()
-    if text == "" then
+    if outputLength < 48 then
       return true
     end
 
-    return text:sub(-3) == "..."
-      or text:find("^original")
-      or text:find("^i am running")
-      or text == "..."
+    if lineCount(inputText) >= 4 and outputLength < math.max(64, math.floor(inputLength * 0.13)) then
+      return true
+    end
+
+    return sentenceishCount(outputText) <= 1
+      and sentenceishCount(inputText) >= 3
+      and outputLength < math.max(72, math.floor(inputLength * 0.15))
+  end
+
+  local function looksLikeEllipsisStub(inputText, outputText)
+    local output = collapseWhitespace(outputText)
+    if output == "" then
+      return true
+    end
+
+    if output == "..." or output:find("…") then
+      return true
+    end
+
+    if output:sub(-3) ~= "..." then
+      return false
+    end
+
+    local input = collapseWhitespace(inputText):lower()
+    local lowered = output:lower():gsub("%.%.%.$", "")
+    if lowered == "" then
+      return true
+    end
+
+    if input:find(lowered, 1, true) == 1 then
+      return true
+    end
+
+    return #output < math.max(40, math.floor(#input * 0.3))
   end
 
   local function looksCorrupted(value)
@@ -175,23 +232,58 @@ function M.new(deps)
     return false
   end
 
-  local function isBadStructuredOutput(spec, parsed, normalized, payloadContext)
+  local function looksLikeIncompleteErrorField(value)
+    local text = trim(value or "")
+    if text == "" then
+      return true
+    end
+
+    if text == "..." or text:find("…") or text:sub(-3) == "..." then
+      return true
+    end
+
+    return #text < 24
+  end
+
+  local function isBadStructuredOutput(spec, resultData, normalized, payloadContext)
     local text = trim(normalized or "")
     if text == "" then
       return true
     end
 
+    local parsed = resultData and resultData.parsed or {}
+    local finishReason = resultData and resultData.finish_reason or nil
+
     if spec.action_name == "rewriteClipboardTersely" then
-      return looksLikePlaceholder(parsed.text or text) or seemsTriviallyShortForRewrite(payloadContext.clipboard, text)
+      return looksLikeEllipsisStub(payloadContext.clipboard, parsed.text or text)
+        or seemsTriviallyShortForRewrite(payloadContext.clipboard, text)
+        or (finishReason == "length" and #text < math.max(96, math.floor(#collapseWhitespace(payloadContext.clipboard) * 0.2)))
     end
 
     if spec.action_name == "explainClipboardError" then
       return looksCorrupted(parsed.root_cause or "")
         or looksCorrupted(parsed.immediate_fix or "")
         or looksCorrupted(parsed.next_checks or "")
+        or looksLikeIncompleteErrorField(parsed.root_cause or "")
+        or looksLikeIncompleteErrorField(parsed.immediate_fix or "")
+        or looksLikeIncompleteErrorField(parsed.next_checks or "")
+        or finishReason == "length"
     end
 
     return false
+  end
+
+  local function rewriteMinLength(inputText)
+    local inputLength = #collapseWhitespace(inputText)
+    if inputLength < 120 then
+      return 12
+    end
+
+    if inputLength < 220 then
+      return 28
+    end
+
+    return math.min(180, math.max(56, math.floor(inputLength * 0.22)))
   end
 
   local function fastSelection(actionName, text)
@@ -230,16 +322,15 @@ function M.new(deps)
     end
 
     local primarySelection = choosePrimarySelection(spec, payloadContext)
-    local prompt = spec.build_prompt(payloadContext)
 
-    local function requestInference(modelSelection, done)
+    local function requestInference(modelSelection, prompt, maxTokens, schema, done)
       client.requestStructuredChatResponse({
         model = modelSelection.model,
         system = prompt.system,
         user = prompt.user,
-        max_tokens = spec.max_output_tokens,
+        max_tokens = maxTokens or spec.max_output_tokens,
         schema_name = spec.schema_name,
-        schema = spec.schema,
+        schema = schema or spec.schema,
         temperature = spec.temperature,
       }, done)
     end
@@ -258,7 +349,7 @@ function M.new(deps)
         return
       end
 
-      if isBadStructuredOutput(spec, result.data.parsed, normalized, payloadContext) then
+      if isBadStructuredOutput(spec, result.data, normalized, payloadContext) then
         showAlert(spec.label .. " returned degraded output.", 2.5)
         return
       end
@@ -268,7 +359,9 @@ function M.new(deps)
 
     local function runFastFallback()
       local fallbackSelection = fastSelection(spec.action_name, payloadContext.clipboard)
-      requestInference(fallbackSelection, function(fallbackResult)
+      local fallbackPrompt = spec.build_prompt(payloadContext)
+      local fallbackSchema = spec.schema_builder and spec.schema_builder(payloadContext, false) or spec.schema
+      requestInference(fallbackSelection, fallbackPrompt, spec.max_output_tokens, fallbackSchema, function(fallbackResult)
         handleFinalResult(fallbackResult, fallbackSelection)
       end)
     end
@@ -279,11 +372,19 @@ function M.new(deps)
     local function processResult(result, modelSelection)
       if result.ok then
         local normalized = spec.normalize_result(result.data.parsed)
-        if isBadStructuredOutput(spec, result.data.parsed, normalized, payloadContext) and not retriedForQuality then
+        if isBadStructuredOutput(spec, result.data, normalized, payloadContext) and not retriedForQuality then
           retriedForQuality = true
-          requestInference(modelSelection, function(retryResult)
-            processResult(retryResult, modelSelection)
-          end)
+          local retryPrompt = spec.build_retry_prompt and spec.build_retry_prompt(payloadContext) or spec.build_prompt(payloadContext)
+          local retrySchema = spec.schema_builder and spec.schema_builder(payloadContext, true) or spec.schema
+          requestInference(
+            modelSelection,
+            retryPrompt,
+            spec.retry_max_output_tokens or spec.max_output_tokens,
+            retrySchema,
+            function(retryResult)
+              processResult(retryResult, modelSelection)
+            end
+          )
           return
         end
       end
@@ -291,7 +392,10 @@ function M.new(deps)
       handleFinalResult(result, modelSelection)
     end
 
-    requestInference(primarySelection, function(initialResult)
+    local primaryPrompt = spec.build_prompt(payloadContext)
+    local primarySchema = spec.schema_builder and spec.schema_builder(payloadContext, false) or spec.schema
+
+    requestInference(primarySelection, primaryPrompt, spec.max_output_tokens, primarySchema, function(initialResult)
       if initialResult.ok or not shouldRetryWithModelLoad(initialResult) then
         if not initialResult.ok and spec.allow_fast_fallback and shouldFallbackToFast(initialResult) then
           runFastFallback()
@@ -315,7 +419,7 @@ function M.new(deps)
           return
         end
 
-        requestInference(primarySelection, function(retriedResult)
+        requestInference(primarySelection, primaryPrompt, spec.max_output_tokens, primarySchema, function(retriedResult)
           if not retriedResult.ok and spec.allow_fast_fallback and shouldFallbackToFast(retriedResult) then
             runFastFallback()
             return
@@ -380,17 +484,29 @@ function M.new(deps)
       action_name = "rewriteClipboardTersely",
       label = "Rewrite Clipboard Tersely",
       max_output_tokens = 900,
+      retry_max_output_tokens = 1200,
       temperature = 0,
       schema_name = "clipboard_rewrite",
-      schema = {
-        type = "object",
-        properties = {
-          text = { type = "string" },
-        },
-        required = { "text" },
-        additionalProperties = false,
-      },
+      schema_builder = function(payloadContext, isRetry)
+        local minLength = rewriteMinLength(payloadContext.clipboard)
+        if isRetry then
+          minLength = math.max(minLength, math.min(260, math.floor(#collapseWhitespace(payloadContext.clipboard) * 0.3)))
+        end
+
+        return {
+          type = "object",
+          properties = {
+            text = {
+              type = "string",
+              minLength = minLength,
+            },
+          },
+          required = { "text" },
+          additionalProperties = false,
+        }
+      end,
       build_prompt = prompts.buildRewritePrompt,
+      build_retry_prompt = prompts.buildRewriteRetryPrompt,
       normalize_result = function(parsed)
         return trim(parsed.text or "")
       end,
@@ -416,20 +532,25 @@ function M.new(deps)
       action_name = "explainClipboardError",
       label = "Explain Clipboard Error",
       max_output_tokens = 1100,
+      retry_max_output_tokens = 1400,
       temperature = 0,
       allow_fast_fallback = true,
       schema_name = "clipboard_error_explanation",
-      schema = {
-        type = "object",
-        properties = {
-          root_cause = { type = "string" },
-          immediate_fix = { type = "string" },
-          next_checks = { type = "string" },
-        },
-        required = { "root_cause", "immediate_fix", "next_checks" },
-        additionalProperties = false,
-      },
+      schema_builder = function(_, isRetry)
+        local minLength = isRetry and 40 or 28
+        return {
+          type = "object",
+          properties = {
+            root_cause = { type = "string", minLength = minLength },
+            immediate_fix = { type = "string", minLength = minLength },
+            next_checks = { type = "string", minLength = minLength },
+          },
+          required = { "root_cause", "immediate_fix", "next_checks" },
+          additionalProperties = false,
+        }
+      end,
       build_prompt = prompts.buildErrorExplainPrompt,
+      build_retry_prompt = prompts.buildErrorExplainRetryPrompt,
       normalize_result = function(parsed)
         return table.concat({
           "Root cause",

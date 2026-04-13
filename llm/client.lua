@@ -373,6 +373,7 @@ function M.new(config)
       local firstChoice = type(choices) == "table" and choices[1] or nil
       local message = firstChoice and firstChoice.message or nil
       local content = message and message.content or nil
+      local finishReason = firstChoice and firstChoice.finish_reason or nil
 
       if type(content) ~= "string" or trim(content) == "" then
         callback(normalizeFailure("empty_output", "The model response did not include structured content", result.data))
@@ -390,6 +391,7 @@ function M.new(config)
         data = {
           parsed = parsed,
           raw_text = content,
+          finish_reason = finishReason,
           raw = result.data,
         },
       })
