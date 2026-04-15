@@ -20,55 +20,21 @@ local function trim(value)
   return (value or ""):match("^%s*(.-)%s*$")
 end
 
-local function isGptOssModel(modelId)
-  local lowered = tostring(modelId or ""):lower()
-  return lowered:find("gpt%-oss", 1, false) ~= nil
+local function collapseWhitespace(value)
+  return trim(tostring(value or ""):gsub("[%s\194\160]+", " "))
 end
 
-local function buildStopSequences(modelId)
-  if isGptOssModel(modelId) then
-    return { "<|end|>" }
+local function previewText(value, maxLength)
+  local flattened = collapseWhitespace(value)
+  if flattened == "" then
+    return ""
   end
 
-  return nil
-end
-
-local function extractFirstJsonObject(text)
-  if type(text) ~= "string" then
-    return nil
+  if #flattened <= maxLength then
+    return flattened
   end
 
-  local startPos = text:find("{", 1, true)
-  if not startPos then
-    return nil
-  end
-
-  local depth = 0
-  local inString = false
-  local escaped = false
-
-  for index = startPos, #text do
-    local ch = text:sub(index, index)
-
-    if escaped then
-      escaped = false
-    elseif ch == "\\" then
-      escaped = true
-    elseif ch == '"' then
-      inString = not inString
-    elseif not inString then
-      if ch == "{" then
-        depth = depth + 1
-      elseif ch == "}" then
-        depth = depth - 1
-        if depth == 0 then
-          return text:sub(startPos, index)
-        end
-      end
-    end
-  end
-
-  return nil
+  return flattened:sub(1, maxLength - 3) .. "..."
 end
 
 local function decodeJson(body)
@@ -100,78 +66,16 @@ local function extractErrorMessage(decoded, fallback)
   return decoded.message or fallback
 end
 
-local function normalizeFailure(code, message, detail)
+local function normalizeFailure(code, message, detail, status)
   return {
     ok = false,
     error = {
       code = code,
       message = message,
       detail = detail,
+      status = status,
     },
   }
-end
-
-local function extractTextFromResponse(decoded)
-  if type(decoded) ~= "table" then
-    return nil
-  end
-
-  if type(decoded.output_text) == "string" and decoded.output_text ~= "" then
-    return decoded.output_text
-  end
-
-  if type(decoded.response) == "string" and decoded.response ~= "" then
-    return decoded.response
-  end
-
-  if type(decoded.output) == "table" then
-    local textParts = {}
-    for _, outputItem in ipairs(decoded.output) do
-      if type(outputItem) == "table" and type(outputItem.content) == "table" then
-        for _, contentItem in ipairs(outputItem.content) do
-          if type(contentItem) == "table" then
-            if type(contentItem.text) == "string" and contentItem.text ~= "" then
-              table.insert(textParts, contentItem.text)
-            elseif contentItem.type == "output_text" and type(contentItem.text) == "string" then
-              table.insert(textParts, contentItem.text)
-            end
-          end
-        end
-      end
-    end
-
-    if #textParts > 0 then
-      return table.concat(textParts, "\n")
-    end
-  end
-
-  if type(decoded.choices) == "table" then
-    local firstChoice = decoded.choices[1]
-    if type(firstChoice) == "table" then
-      if type(firstChoice.text) == "string" and firstChoice.text ~= "" then
-        return firstChoice.text
-      end
-
-      if type(firstChoice.message) == "table" and type(firstChoice.message.content) == "string" then
-        return firstChoice.message.content
-      end
-
-      if type(firstChoice.message) == "table" and type(firstChoice.message.content) == "table" then
-        local parts = {}
-        for _, contentItem in ipairs(firstChoice.message.content) do
-          if type(contentItem) == "table" and type(contentItem.text) == "string" then
-            table.insert(parts, contentItem.text)
-          end
-        end
-
-        if #parts > 0 then
-          return table.concat(parts, "\n")
-        end
-      end
-    end
-  end
-
-  return nil
 end
 
 local function buildInputBlocks(systemPrompt, userPrompt)
@@ -204,10 +108,155 @@ local function buildInputBlocks(systemPrompt, userPrompt)
   return items
 end
 
+local function flattenContentArray(content)
+  local parts = {}
+  for _, item in ipairs(content or {}) do
+    if type(item) == "string" then
+      local text = trim(item)
+      if text ~= "" then
+        table.insert(parts, text)
+      end
+    elseif type(item) == "table" then
+      if type(item.text) == "string" and item.text ~= "" then
+        table.insert(parts, item.text)
+      elseif item.type == "output_text" and type(item.text) == "string" then
+        table.insert(parts, item.text)
+      elseif type(item.content) == "string" and item.content ~= "" then
+        table.insert(parts, item.content)
+      end
+    end
+  end
+
+  if #parts == 0 then
+    return nil
+  end
+
+  return table.concat(parts, "\n")
+end
+
+local function extractTextFromResponses(decoded)
+  if type(decoded) ~= "table" then
+    return nil
+  end
+
+  if type(decoded.output_text) == "string" and decoded.output_text ~= "" then
+    return decoded.output_text
+  end
+
+  if type(decoded.response) == "string" and decoded.response ~= "" then
+    return decoded.response
+  end
+
+  if type(decoded.output) == "table" then
+    local parts = {}
+    for _, outputItem in ipairs(decoded.output) do
+      if type(outputItem) == "table" then
+        if type(outputItem.content) == "table" then
+          local flattened = flattenContentArray(outputItem.content)
+          if flattened and flattened ~= "" then
+            table.insert(parts, flattened)
+          end
+        elseif outputItem.type == "message" and type(outputItem.text) == "string" then
+          table.insert(parts, outputItem.text)
+        end
+      end
+    end
+
+    if #parts > 0 then
+      return table.concat(parts, "\n")
+    end
+  end
+
+  return nil
+end
+
+local function extractTextFromNativeChat(decoded)
+  if type(decoded) ~= "table" then
+    return nil, {}
+  end
+
+  local output = type(decoded.output) == "table" and decoded.output or {}
+  local messageParts = {}
+  local reasoningParts = {}
+
+  for _, item in ipairs(output) do
+    if type(item) == "table" then
+      if item.type == "message" and type(item.content) == "string" and trim(item.content) ~= "" then
+        table.insert(messageParts, item.content)
+      elseif item.type == "reasoning" and type(item.content) == "string" and trim(item.content) ~= "" then
+        table.insert(reasoningParts, item.content)
+      end
+    end
+  end
+
+  local text = nil
+  if #messageParts > 0 then
+    text = table.concat(messageParts, "\n")
+  end
+
+  local reasoningContent = nil
+  if #reasoningParts > 0 then
+    reasoningContent = table.concat(reasoningParts, "\n")
+  end
+
+  return text, {
+    reasoning_content = reasoningContent,
+    stats = decoded.stats,
+  }
+end
+
+local function extractTextFromChatCompletions(decoded)
+  if type(decoded) ~= "table" then
+    return nil, nil, {}
+  end
+
+  local firstChoice = type(decoded.choices) == "table" and decoded.choices[1] or nil
+  if type(firstChoice) ~= "table" then
+    return nil, nil, {}
+  end
+
+  local finishReason = firstChoice.finish_reason
+  local message = type(firstChoice.message) == "table" and firstChoice.message or nil
+
+  if type(firstChoice.text) == "string" and firstChoice.text ~= "" then
+    return firstChoice.text, finishReason, { raw_choice = firstChoice }
+  end
+
+  if message then
+    local content = message.content
+    if type(content) == "string" and content ~= "" then
+      return content, finishReason, { raw_choice = firstChoice }
+    end
+
+    if type(content) == "table" then
+      return flattenContentArray(content), finishReason, { raw_choice = firstChoice }
+    end
+  end
+
+  local reasoningContent = nil
+  if message and type(message.reasoning_content) == "string" and trim(message.reasoning_content) ~= "" then
+    reasoningContent = message.reasoning_content
+  elseif type(firstChoice.reasoning_content) == "string" and trim(firstChoice.reasoning_content) ~= "" then
+    reasoningContent = firstChoice.reasoning_content
+  end
+
+  return nil, finishReason, {
+    raw_choice = firstChoice,
+    reasoning_content = reasoningContent,
+  }
+end
+
+M._test = {
+  extractTextFromResponses = extractTextFromResponses,
+  extractTextFromChatCompletions = extractTextFromChatCompletions,
+  extractTextFromNativeChat = extractTextFromNativeChat,
+  flattenContentArray = flattenContentArray,
+}
+
 function M.new(config)
   local headers = buildHeaders(config)
 
-  local function jsonRequest(url, method, payload, timeoutMs, callback)
+  local function rawRequest(url, method, body, timeoutMs, callback)
     local completed = false
     local timeout = hs.timer.doAfter(timeoutMs / 1000, function()
       if completed then
@@ -215,19 +264,8 @@ function M.new(config)
       end
 
       completed = true
-      callback(normalizeFailure("timeout", string.format("%s request timed out", method), url))
+      callback(nil, nil, nil, normalizeFailure("timeout", string.format("%s request timed out", method), url))
     end)
-
-    local body = nil
-    if payload ~= nil then
-      local ok, encoded = pcall(hs.json.encode, payload)
-      if not ok then
-        timeout:stop()
-        callback(normalizeFailure("json_encode_failed", "Failed to encode request payload", encoded))
-        return
-      end
-      body = encoded
-    end
 
     hs.http.doAsyncRequest(url, method, body, headers, function(statusCode, responseBody, responseHeaders)
       if completed then
@@ -238,19 +276,40 @@ function M.new(config)
       timeout:stop()
 
       if type(statusCode) ~= "number" then
-        callback(normalizeFailure("request_failed", "HTTP request failed", statusCode))
+        callback(nil, nil, nil, normalizeFailure("request_failed", "HTTP request failed", statusCode))
+        return
+      end
+
+      callback(statusCode, responseBody, responseHeaders, nil)
+    end)
+  end
+
+  local function jsonRequest(url, method, payload, timeoutMs, callback)
+    local body = nil
+    if payload ~= nil then
+      local ok, encoded = pcall(hs.json.encode, payload)
+      if not ok then
+        callback(normalizeFailure("json_encode_failed", "Failed to encode request payload", encoded))
+        return
+      end
+      body = encoded
+    end
+
+    rawRequest(url, method, body, timeoutMs, function(statusCode, responseBody, responseHeaders, transportError)
+      if transportError then
+        callback(transportError)
         return
       end
 
       local ok, decoded = decodeJson(responseBody)
       if statusCode < 200 or statusCode >= 300 then
         local message = ok and extractErrorMessage(decoded, "Backend request failed") or "Backend request failed"
-        callback(normalizeFailure(string.format("http_%d", statusCode), message, responseBody))
+        callback(normalizeFailure(string.format("http_%d", statusCode), message, responseBody, statusCode))
         return
       end
 
       if not ok then
-        callback(normalizeFailure("json_decode_failed", "Failed to decode response payload", decoded))
+        callback(normalizeFailure("json_decode_failed", "Failed to decode response payload", decoded, statusCode))
         return
       end
 
@@ -273,6 +332,50 @@ function M.new(config)
     jsonRequest(args.url, args.method, args.payload, args.timeout_ms, callback)
   end
 
+  function self.probePostEndpoint(path, callback)
+    jsonRequest(config.backend.openai_base .. path, "POST", {}, config.backend.status_timeout_ms, function(result)
+      if result.ok then
+        callback({ ok = true, data = { available = true, status = result.status } })
+        return
+      end
+
+      local status = result.error and result.error.status or nil
+      if status == 400 or status == 401 or status == 422 then
+        callback({ ok = true, data = { available = true, status = status } })
+        return
+      end
+
+      if status == 404 or status == 405 then
+        callback({ ok = true, data = { available = false, status = status } })
+        return
+      end
+
+      callback(result)
+    end)
+  end
+
+  function self.probeNativePostEndpoint(path, callback)
+    jsonRequest(config.backend.native_base .. path, "POST", {}, config.backend.status_timeout_ms, function(result)
+      if result.ok then
+        callback({ ok = true, data = { available = true, status = result.status } })
+        return
+      end
+
+      local status = result.error and result.error.status or nil
+      if status == 400 or status == 401 or status == 422 then
+        callback({ ok = true, data = { available = true, status = status } })
+        return
+      end
+
+      if status == 404 or status == 405 then
+        callback({ ok = true, data = { available = false, status = status } })
+        return
+      end
+
+      callback(result)
+    end)
+  end
+
   function self.listModels(callback)
     self.requestJson({
       url = config.backend.openai_base .. "/models",
@@ -289,96 +392,32 @@ function M.new(config)
     }, callback)
   end
 
-  function self.loadModel(modelId, callback)
-    local payloads = {
-      { model = modelId },
-      { id = modelId },
-      { identifier = modelId },
-    }
-
-    local function tryPayload(index)
-      local payload = payloads[index]
-      if not payload then
-        callback(normalizeFailure(
-          "model_load_failed",
-          "Failed to load model with available payload formats",
-          modelId
-        ))
-        return
-      end
-
-      self.requestJson({
-        url = config.backend.native_base .. "/models/load",
-        method = "POST",
-        payload = payload,
-        timeout_ms = config.backend.request_timeout_ms,
-      }, function(result)
-        if result.ok then
-          callback(result)
-          return
-        end
-
-        local detail = tostring(result.error and result.error.detail or "")
-        local message = tostring(result.error and result.error.message or "")
-        local combined = (message .. " " .. detail):lower()
-        local schemaMismatch = combined:find("unknown key") or combined:find("unknown field") or combined:find("invalid type")
-
-        if schemaMismatch then
-          tryPayload(index + 1)
-          return
-        end
-
-        callback(result)
-      end)
+  function self.loadModel(modelId, ttlSeconds, callback)
+    if type(ttlSeconds) == "function" then
+      callback = ttlSeconds
+      ttlSeconds = nil
     end
 
-    tryPayload(1)
+    local payload = { model = modelId }
+    if type(ttlSeconds) == "number" and ttlSeconds > 0 then
+      payload.ttl = ttlSeconds
+    end
+
+    self.requestJson({
+      url = config.backend.native_base .. "/models/load",
+      method = "POST",
+      payload = payload,
+      timeout_ms = config.backend.request_timeout_ms,
+    }, callback)
   end
 
-  function self.unloadModel(modelId, callback)
-    local payloads = {
-      { model = modelId },
-      { id = modelId },
-      { identifier = modelId },
-    }
-
-    local function tryPayload(index)
-      local payload = payloads[index]
-      if not payload then
-        callback(normalizeFailure(
-          "model_unload_failed",
-          "Failed to unload model with available payload formats",
-          modelId
-        ))
-        return
-      end
-
-      self.requestJson({
-        url = config.backend.native_base .. "/models/unload",
-        method = "POST",
-        payload = payload,
-        timeout_ms = config.backend.request_timeout_ms,
-      }, function(result)
-        if result.ok then
-          callback(result)
-          return
-        end
-
-        local detail = tostring(result.error and result.error.detail or "")
-        local message = tostring(result.error and result.error.message or "")
-        local combined = (message .. " " .. detail):lower()
-        local schemaMismatch = combined:find("unknown key") or combined:find("unknown field") or combined:find("invalid type")
-
-        if schemaMismatch then
-          tryPayload(index + 1)
-          return
-        end
-
-        callback(result)
-      end)
-    end
-
-    tryPayload(1)
+  function self.unloadModelInstance(instanceId, callback)
+    self.requestJson({
+      url = config.backend.native_base .. "/models/unload",
+      method = "POST",
+      payload = { instance_id = instanceId },
+      timeout_ms = config.backend.request_timeout_ms,
+    }, callback)
   end
 
   function self.responsesRequest(payload, callback)
@@ -393,6 +432,15 @@ function M.new(config)
   function self.chatCompletionsRequest(payload, callback)
     self.requestJson({
       url = config.backend.openai_base .. "/chat/completions",
+      method = "POST",
+      payload = payload,
+      timeout_ms = config.backend.request_timeout_ms,
+    }, callback)
+  end
+
+  function self.nativeChatRequest(payload, callback)
+    self.requestJson({
+      url = config.backend.native_base .. "/chat",
       method = "POST",
       payload = payload,
       timeout_ms = config.backend.request_timeout_ms,
@@ -415,9 +463,120 @@ function M.new(config)
         return
       end
 
-      local text = extractTextFromResponse(result.data)
-      if not text or text == "" then
+      local text = extractTextFromResponses(result.data)
+      if not text or trim(text) == "" then
         callback(normalizeFailure("empty_output", "The model response did not include text output", result.data))
+        return
+      end
+
+      callback({
+        ok = true,
+        data = {
+          text = trim(text),
+          raw = result.data,
+        },
+      })
+    end)
+  end
+
+  function self.requestPlainChatCompletion(request, callback)
+    local payload = {
+      model = request.model,
+      messages = {
+        {
+          role = "system",
+          content = request.system,
+        },
+        {
+          role = "user",
+          content = request.user,
+        },
+      },
+      temperature = request.temperature or 0,
+      stream = false,
+    }
+
+    if request.max_tokens then
+      payload.max_tokens = request.max_tokens
+    end
+
+    if type(request.stop) == "table" and #request.stop > 0 then
+      payload.stop = request.stop
+    end
+
+    self.chatCompletionsRequest(payload, function(result)
+      if not result.ok then
+        callback(result)
+        return
+      end
+
+      local text, finishReason, meta = extractTextFromChatCompletions(result.data)
+      if not text or trim(text) == "" then
+        if type(meta) == "table" and type(meta.reasoning_content) == "string" and trim(meta.reasoning_content) ~= "" then
+          callback(normalizeFailure(
+            "reasoning_only_output",
+            "The model produced reasoning output but no final text",
+            {
+              finish_reason = finishReason,
+              reasoning_preview = previewText(meta.reasoning_content, 180),
+            }
+          ))
+          return
+        end
+
+        local detail = finishReason and ("finish_reason=" .. tostring(finishReason)) or nil
+        callback(normalizeFailure("empty_output", "The model response did not include text output", detail))
+        return
+      end
+
+      callback({
+        ok = true,
+        data = {
+          text = trim(text),
+          finish_reason = finishReason,
+          raw = result.data,
+        },
+      })
+    end)
+  end
+
+  function self.requestNativeChat(request, callback)
+    local payload = {
+      model = request.model,
+      system_prompt = request.system,
+      input = request.user,
+      temperature = request.temperature or 0,
+      store = false,
+    }
+
+    if request.max_output_tokens then
+      payload.max_output_tokens = request.max_output_tokens
+    end
+
+    if request.reasoning then
+      payload.reasoning = request.reasoning
+    end
+
+    self.nativeChatRequest(payload, function(result)
+      if not result.ok then
+        callback(result)
+        return
+      end
+
+      local text, meta = extractTextFromNativeChat(result.data)
+      if not text or trim(text) == "" then
+        if type(meta) == "table" and type(meta.reasoning_content) == "string" and trim(meta.reasoning_content) ~= "" then
+          callback(normalizeFailure(
+            "reasoning_only_output",
+            "The model produced reasoning output but no final text",
+            {
+              reasoning_preview = previewText(meta.reasoning_content, 180),
+            }
+          ))
+          return
+        end
+
+        callback(normalizeFailure("empty_output", "The model response did not include text output", nil))
         return
       end
 
@@ -460,40 +619,21 @@ function M.new(config)
       payload.max_tokens = request.max_tokens
     end
 
-    local stopSequences = request.stop or buildStopSequences(request.model)
-    if stopSequences then
-      payload.stop = stopSequences
-    end
-
     self.chatCompletionsRequest(payload, function(result)
       if not result.ok then
         callback(result)
         return
       end
 
-      local choices = result.data and result.data.choices
-      local firstChoice = type(choices) == "table" and choices[1] or nil
-      local message = firstChoice and firstChoice.message or nil
-      local content = message and message.content or nil
-      local finishReason = firstChoice and firstChoice.finish_reason or nil
-
-      if type(content) ~= "string" or trim(content) == "" then
+      local text, finishReason = extractTextFromChatCompletions(result.data)
+      if not text or trim(text) == "" then
         callback(normalizeFailure("empty_output", "The model response did not include structured content", result.data))
         return
       end
 
-      local ok, parsed = pcall(hs.json.decode, content)
-      local decodedText = content
-      if (not ok or type(parsed) ~= "table") and type(content) == "string" then
-        local extracted = extractFirstJsonObject(content)
-        if extracted and extracted ~= "" then
-          decodedText = extracted
-          ok, parsed = pcall(hs.json.decode, extracted)
-        end
-      end
-
+      local ok, parsed = pcall(hs.json.decode, text)
       if not ok or type(parsed) ~= "table" then
-        callback(normalizeFailure("json_decode_failed", "The model returned invalid JSON for structured output", content))
+        callback(normalizeFailure("json_decode_failed", "The model returned invalid JSON for structured output", text))
         return
       end
 
@@ -501,7 +641,7 @@ function M.new(config)
         ok = true,
         data = {
           parsed = parsed,
-          raw_text = decodedText,
+          raw_text = text,
           finish_reason = finishReason,
           raw = result.data,
         },

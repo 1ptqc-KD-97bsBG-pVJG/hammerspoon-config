@@ -16,6 +16,13 @@ while IFS= read -r script; do
   bash -n "$script"
 done < <(find scripts githooks -type f \( -name '*.sh' -o -name 'pre-commit' \) | sort)
 
+if command -v lua >/dev/null 2>&1; then
+  say "Running Lua regression tests"
+  while IFS= read -r test_file; do
+    lua "$test_file"
+  done < <(find tests -type f -name '*.lua' | sort)
+fi
+
 say "Checking git diff formatting"
 git diff --check -- . ':(exclude).git'
 

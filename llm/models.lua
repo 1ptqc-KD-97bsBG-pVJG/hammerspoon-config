@@ -20,13 +20,10 @@ local CODE_PATTERNS = {
   ";",
 }
 
-local ACTION_ROLE_MAP = {
-  summarizeClipboard = "fast",
-  rewriteClipboardTersely = "fast",
-  explainClipboardError = "fast",
-  draftUtilityScript = "code",
-  sendToOpenWebUI = "fast",
-  saveClipboardSummary = "fast",
+local CLIPBOARD_ACTIONS = {
+  summarizeClipboard = true,
+  rewriteClipboardTersely = true,
+  explainClipboardError = true,
 }
 
 local function trim(value)
@@ -55,15 +52,92 @@ function M.new(config)
     return false
   end
 
-  function self.resolveRoleForAction(actionName, text)
-    if actionName == "explainClipboardError" and self.looksLikeCodeOrLog(text) then
+  function self.isClipboardAction(actionName)
+    return CLIPBOARD_ACTIONS[actionName] == true
+  end
+
+  function self.listClipboardProfiles()
+    local profiles = {}
+    for name, profile in pairs(config.clipboard.profiles) do
+      table.insert(profiles, {
+        name = name,
+        label = profile.label,
+        model = profile.model,
+        api = profile.api,
+        requires_thinking_disabled = profile.requires_thinking_disabled == true,
+      })
+    end
+
+    table.sort(profiles, function(a, b)
+      return a.name < b.name
+    end)
+
+    return profiles
+  end
+
+  function self.getClipboardProfile(profileName)
+    local name = profileName or config.clipboard.active_profile
+    local profile = config.clipboard.profiles[name]
+    if not profile then
+      return nil
+    end
+
+    return {
+      name = name,
+      label = profile.label,
+      model = profile.model,
+      api = profile.api,
+      reasoning = profile.reasoning,
+      requires_thinking_disabled = profile.requires_thinking_disabled == true,
+    }
+  end
+
+  function self.getClipboardProfileNames()
+    local names = {}
+    for name in pairs(config.clipboard.profiles) do
+      table.insert(names, name)
+    end
+    table.sort(names)
+    return names
+  end
+
+  function self.describeClipboardProfile(profileName)
+    local profile = self.getClipboardProfile(profileName)
+    if not profile then
+      return nil
+    end
+
+    profile.summary = string.format(
+      "%s -> %s via %s",
+      profile.name,
+      profile.model,
+      profile.api
+    )
+    return profile
+  end
+
+  function self.resolveRoleForAction(actionName)
+    if self.isClipboardAction(actionName) then
+      return "clipboard"
+    end
+
+    if actionName == "draftUtilityScript" then
       return "code"
     end
 
-    return ACTION_ROLE_MAP[actionName] or "fast"
+    if actionName == "sendToOpenWebUI" or actionName == "saveClipboardSummary" then
+      return "fast"
+    end
+
+    return "fast"
   end
 
-  function self.resolveModelForRole(role)
+  function self.resolveModelForRole(role, profileName)
+    if role == "clipboard" then
+      local profile = self.getClipboardProfile(profileName)
+      return profile and profile.model or nil
+    end
+
     if role == "reason" then
       return config.models.reason
     end
@@ -79,33 +153,30 @@ function M.new(config)
     return config.models.fast
   end
 
-  function self.resolveModelForAction(actionName, text)
+  function self.describeSelection(actionName, text, profileName)
     local role = self.resolveRoleForAction(actionName, text)
+    if role == "clipboard" then
+      local profile = self.describeClipboardProfile(profileName)
+      return {
+        action = actionName,
+        role = role,
+        model = profile.model,
+        api = profile.api,
+        profile = profile.name,
+        profile_label = profile.label,
+        is_code_like = self.looksLikeCodeOrLog(text),
+        summary = string.format("%s -> %s (%s)", actionName, profile.model, profile.name),
+      }
+    end
+
+    local model = self.resolveModelForRole(role)
     return {
       action = actionName,
       role = role,
-      model = self.resolveModelForRole(role),
+      model = model,
       is_code_like = self.looksLikeCodeOrLog(text),
+      summary = string.format("%s -> %s (%s)", actionName, model, role),
     }
-  end
-
-  function self.requiresColdStartWarning(modelId, role)
-    return role ~= "fast" and modelId ~= config.models.fast
-  end
-
-  function self.describeSelection(actionName, text)
-    local resolved = self.resolveModelForAction(actionName, text)
-    local summary = string.format("%s -> %s (%s)", actionName, resolved.model, resolved.role)
-    if actionName == "explainClipboardError" and resolved.role == "code" then
-      summary = summary .. " [code/log heuristic]"
-    end
-
-    resolved.summary = summary
-    return resolved
-  end
-
-  function self.isFastModel(modelId)
-    return modelId == config.models.fast
   end
 
   return self

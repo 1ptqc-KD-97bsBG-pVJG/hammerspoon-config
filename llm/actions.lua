@@ -8,8 +8,25 @@ local function isBlank(value)
   return trim(value) == ""
 end
 
+local function collapseWhitespace(value)
+  return trim((value or ""):gsub("[%s\194\160]+", " "))
+end
+
+local function lineCount(value)
+  local text = trim(value or "")
+  if text == "" then
+    return 0
+  end
+
+  local count = 1
+  for _ in text:gmatch("\n") do
+    count = count + 1
+  end
+  return count
+end
+
 local function previewText(value, maxLength)
-  local flattened = trim((value or ""):gsub("%s+", " "))
+  local flattened = collapseWhitespace(value)
   if flattened == "" then
     return ""
   end
@@ -19,6 +36,31 @@ local function previewText(value, maxLength)
   end
 
   return flattened:sub(1, maxLength - 3) .. "..."
+end
+
+local function sanitizeModelText(value)
+  local text = tostring(value or "")
+
+  local markers = {
+    "<|start|>",
+    "<|channel|>",
+    "<|message|>",
+    "<|end|>",
+  }
+
+  for _, marker in ipairs(markers) do
+    local startPos = text:find(marker, 1, true)
+    if startPos then
+      text = text:sub(1, startPos - 1)
+    end
+  end
+
+  return trim(text)
+end
+
+local function startsLikeJson(value)
+  local text = trim(value or "")
+  return text:sub(1, 1) == "{" or text:sub(1, 1) == "["
 end
 
 local function punctuationDensity(value)
@@ -40,38 +82,6 @@ local function punctuationDensity(value)
   return punct / total
 end
 
-local function collapseWhitespace(value)
-  return trim((value or ""):gsub("[%s\194\160]+", " "))
-end
-
-local function lineCount(value)
-  local text = trim(value or "")
-  if text == "" then
-    return 0
-  end
-
-  local count = 1
-  for _ in text:gmatch("\n") do
-    count = count + 1
-  end
-
-  return count
-end
-
-local function sentenceishCount(value)
-  local text = trim(value or "")
-  if text == "" then
-    return 0
-  end
-
-  local count = 0
-  for _ in text:gmatch("[%.%!%?;:\n]") do
-    count = count + 1
-  end
-
-  return math.max(1, count)
-end
-
 function M.new(deps)
   local config = deps.config
   local client = deps.client
@@ -79,84 +89,187 @@ function M.new(deps)
   local prompts = deps.prompts
   local context = deps.context
   local status = deps.status
+  local storage = deps.storage
 
   local self = {}
+  local activeNotifications = {}
+  local activeOverlay = nil
+  local activeOverlayTimer = nil
 
-  local function showAlert(message, seconds)
-    hs.alert.show(message, nil, nil, seconds or 2)
+  local function developerModeEnabled()
+    return status.getDeveloperMode and status.getDeveloperMode() == true
   end
 
-  local function showNotReady(actionLabel)
-    showAlert(string.format("%s is wired but not implemented yet.", actionLabel), 2)
+  local function resolvedAlertSeconds(seconds)
+    local base = developerModeEnabled()
+      and ((config.debug and config.debug.developer_alert_seconds) or 20)
+      or ((config.debug and config.debug.alert_seconds) or 12)
+
+    if type(seconds) == "number" and seconds > 0 then
+      return math.max(seconds, base)
+    end
+
+    return base
   end
 
-  local function showClipboardRequired(actionLabel)
-    showAlert(string.format("%s needs clipboard text first.", actionLabel), 2)
+  local function maybeCopyAlertToClipboard(message, outputText)
+    if not developerModeEnabled() then
+      return
+    end
+
+    if config.debug and config.debug.copy_alerts_to_clipboard == false then
+      return
+    end
+
+    if type(outputText) == "string" and trim(outputText) ~= "" then
+      hs.pasteboard.setContents(message)
+      hs.timer.doAfter((config.debug and config.debug.clipboard_sequence_delay_s) or 0.2, function()
+        hs.pasteboard.setContents(outputText)
+      end)
+      return
+    end
+
+    hs.pasteboard.setContents(message)
   end
 
-  local function showColdStartWarning(modelId, role)
-    local roleLabel = role == "code" and "code" or role
-    showAlert(string.format("Loading %s model: %s", roleLabel, modelId), 2.5)
+  local function showNotification(message, seconds)
+    local note = hs.notify.new({
+      title = "Local Model Harness",
+      informativeText = message,
+      autoWithdraw = true,
+    })
+
+    note:withdrawAfter(0)
+    note:send()
+    table.insert(activeNotifications, note)
+
+    if #activeNotifications > 20 then
+      table.remove(activeNotifications, 1)
+    end
+  end
+
+  local function dismissOverlay()
+    if activeOverlayTimer then
+      activeOverlayTimer:stop()
+      activeOverlayTimer = nil
+    end
+
+    if activeOverlay then
+      activeOverlay:delete()
+      activeOverlay = nil
+    end
+  end
+
+  local function estimateWrappedLineCount(message, width)
+    local usableWidth = math.max(240, width - 96)
+    local charsPerLine = math.max(24, math.floor(usableWidth / 13))
+    local total = 0
+
+    for rawLine in tostring(message or ""):gmatch("[^\n]+") do
+      local line = collapseWhitespace(rawLine)
+      if line == "" then
+        total = total + 1
+      else
+        total = total + math.max(1, math.ceil(#line / charsPerLine))
+      end
+    end
+
+    return math.max(total, 1)
+  end
+
+  local function showOverlay(message, seconds)
+    dismissOverlay()
+
+    local focusedWindow = hs.window.frontmostWindow()
+    local screen = focusedWindow and focusedWindow:screen() or hs.screen.mainScreen()
+    local frame = screen:fullFrame()
+    local width = math.min(math.max(frame.w * 0.78, 720), 1500)
+    local wrappedLines = estimateWrappedLineCount(message, width)
+    local height = math.min(math.max(110, 56 + (wrappedLines * 34)), frame.h * 0.65)
+    local top = frame.y + math.max(30, frame.h * 0.035)
+    local left = frame.x + ((frame.w - width) / 2)
+
+    activeOverlay = hs.canvas.new({
+      x = left,
+      y = top,
+      w = width,
+      h = height,
+    })
+
+    activeOverlay:level("overlay")
+    activeOverlay:replaceElements(
+      {
+        type = "rectangle",
+        action = "fill",
+        roundedRectRadii = { xRadius = 24, yRadius = 24 },
+        fillColor = { red = 0.06, green = 0.06, blue = 0.06, alpha = 0.96 },
+        strokeColor = { white = 1.0, alpha = 0.18 },
+        strokeWidth = 2,
+        frame = { x = 0, y = 0, w = "100%", h = "100%" },
+      },
+      {
+        type = "text",
+        text = message,
+        textSize = 28,
+        textColor = { white = 1.0, alpha = 1.0 },
+        textAlignment = "center",
+        frame = { x = 34, y = 24, w = width - 68, h = height - 48 },
+      }
+    )
+    activeOverlay:show()
+
+    activeOverlayTimer = hs.timer.doAfter(seconds, function()
+      dismissOverlay()
+    end)
+  end
+
+  local function showAlert(message, seconds, outputText)
+    local duration = resolvedAlertSeconds(seconds)
+    showOverlay(message, duration)
+    showNotification(message, duration)
+    maybeCopyAlertToClipboard(message, outputText)
   end
 
   local function copyResult(text)
     hs.pasteboard.setContents(text)
   end
 
-  local function formatFailure(actionLabel, result)
+  local function showClipboardRequired(actionLabel)
+    showAlert(string.format("%s needs clipboard text first.", actionLabel), 2)
+  end
+
+  local function showNotReady(actionLabel)
+    showAlert(string.format("%s is wired but not implemented yet.", actionLabel), 2)
+  end
+
+  local function formatFailure(actionLabel, result, profile)
     local message = actionLabel .. " failed."
+    local errorObject = result and result.error or {}
+
+    if errorObject.code == "reasoning_only_output" then
+      if profile and profile.requires_thinking_disabled then
+        return string.format(
+          "%s %s is still returning reasoning instead of final text. Disable thinking in LM Studio and retry.",
+          message,
+          profile.label
+        )
+      end
+
+      return message .. " The model produced reasoning output but no final text."
+    end
+
     if result and result.error and result.error.message and result.error.message ~= "" then
       message = string.format("%s %s", message, result.error.message)
-    else
-      local snapshot = status.getStatusSnapshot()
-      if snapshot.last_error and snapshot.last_error ~= "" then
-        message = string.format("%s %s", message, snapshot.last_error)
+    end
+
+    if errorObject and type(errorObject.detail) == "string" and errorObject.detail ~= "" then
+      local detail = errorObject.detail
+      if #detail < 140 then
+        message = string.format("%s %s", message, detail)
       end
     end
 
     return message
-  end
-
-  local function errorText(result)
-    if not result or not result.error then
-      return ""
-    end
-
-    local message = tostring(result.error.message or "")
-    local detail = tostring(result.error.detail or "")
-    return (message .. " " .. detail):lower()
-  end
-
-  local function shouldRetryWithModelLoad(result)
-    if not config.backend.enable_native_model_management then
-      return false
-    end
-
-    local combined = errorText(result)
-    if combined == "" then
-      return false
-    end
-
-    return combined:find("model not loaded", 1, true)
-      or combined:find("not currently loaded", 1, true)
-      or combined:find("no model loaded", 1, true)
-      or combined:find("load the model", 1, true)
-      or combined:find("load a model", 1, true)
-      or combined:find("model is not loaded", 1, true)
-  end
-
-  local function shouldFallbackToFast(result)
-    local combined = errorText(result)
-    if combined == "" then
-      return false
-    end
-
-    return combined:find("insufficient system resources", 1, true)
-      or combined:find("insufficient resources", 1, true)
-      or combined:find("overload", 1, true)
-      or combined:find("out of memory", 1, true)
-      or combined:find("not enough memory", 1, true)
-      or combined:find("cannot load model", 1, true)
   end
 
   local function buildInstantContext()
@@ -167,309 +280,291 @@ function M.new(deps)
     })
   end
 
-  local function seemsTriviallyShortForRewrite(inputText, outputText)
-    local inputLength = #collapseWhitespace(inputText)
-    local outputLength = #collapseWhitespace(outputText)
-
-    if inputLength < 220 then
-      return false
-    end
-
-    if outputLength < 48 then
-      return true
-    end
-
-    if lineCount(inputText) >= 4 and outputLength < math.max(64, math.floor(inputLength * 0.13)) then
-      return true
-    end
-
-    return sentenceishCount(outputText) <= 1
-      and sentenceishCount(inputText) >= 3
-      and outputLength < math.max(72, math.floor(inputLength * 0.15))
+  local function getActiveClipboardProfile()
+    local profileName = status.getActiveClipboardProfile()
+    return models.getClipboardProfile(profileName)
   end
 
-  local function looksLikeEllipsisStub(inputText, outputText)
-    local output = collapseWhitespace(outputText)
+  local function recordBakeoff(event)
+    if not config.clipboard.bakeoff_mode then
+      return
+    end
+
+    storage.appendDiagnosticRecord(event)
+  end
+
+  local function looksLikeReasoningLeak(text)
+    local lowered = (text or ""):lower()
+    return lowered:find("<|start|>", 1, true)
+      or lowered:find("<|channel|>analysis", 1, true)
+      or lowered:find("<|channel|>commentary", 1, true)
+      or lowered:find("<|channel|>final", 1, true)
+      or lowered:find("valid channels:", 1, true)
+  end
+
+  local function normalizeSummaryText(text)
+    local lines = {}
+    for line in tostring(text or ""):gmatch("[^\n]+") do
+      local cleaned = trim(line)
+      if cleaned ~= "" then
+        cleaned = cleaned:gsub("^[-*•]%s*", "")
+        table.insert(lines, "- " .. cleaned)
+      end
+    end
+
+    if #lines == 0 then
+      return nil
+    end
+
+    if #lines > 3 then
+      return nil
+    end
+
+    return table.concat(lines, "\n")
+  end
+
+  local function isBadRewrite(inputText, outputText)
+    local output = sanitizeModelText(outputText)
     if output == "" then
-      return true
+      return true, "empty"
+    end
+
+    if startsLikeJson(output) then
+      return true, "json_wrapper"
+    end
+
+    if looksLikeReasoningLeak(output) then
+      return true, "reasoning_leak"
     end
 
     if output == "..." or output:find("…") then
-      return true
+      return true, "ellipsis_stub"
     end
 
-    if output:sub(-3) ~= "..." then
-      return false
-    end
-
-    local input = collapseWhitespace(inputText):lower()
-    local lowered = output:lower():gsub("%.%.%.$", "")
-    if lowered == "" then
-      return true
-    end
-
-    if input:find(lowered, 1, true) == 1 then
-      return true
-    end
-
-    return #output < math.max(40, math.floor(#input * 0.3))
-  end
-
-  local function looksCorrupted(value)
-    local text = trim(value or "")
-    if text == "" then
-      return true
-    end
-
-    if punctuationDensity(text) > 0.35 then
-      return true
-    end
-
-    if text:find("…") and punctuationDensity(text) > 0.2 then
-      return true
-    end
-
-    return false
-  end
-
-  local function looksLikeIncompleteErrorField(value)
-    local text = trim(value or "")
-    if text == "" then
-      return true
-    end
-
-    if text == "..." or text:find("…") or text:sub(-3) == "..." then
-      return true
-    end
-
-    return #text < 24
-  end
-
-  local function containsErrorSections(value)
-    local text = trim(value or ""):lower()
-    return text:find("root cause", 1, true)
-      and text:find("immediate fix", 1, true)
-      and text:find("what to check next", 1, true)
-  end
-
-  local function isBadStructuredOutput(spec, resultData, normalized, payloadContext)
-    local text = trim(normalized or "")
-    if text == "" then
-      return true
-    end
-
-    local parsed = resultData and resultData.parsed or {}
-    local finishReason = resultData and resultData.finish_reason or nil
-
-    if spec.action_name == "rewriteClipboardTersely" then
-      return looksLikeEllipsisStub(payloadContext.clipboard, parsed.text or text)
-        or seemsTriviallyShortForRewrite(payloadContext.clipboard, text)
-        or (finishReason == "length" and #text < math.max(96, math.floor(#collapseWhitespace(payloadContext.clipboard) * 0.2)))
-    end
-
-    if spec.action_name == "explainClipboardError" then
-      local answer = parsed.text or text
-      return not containsErrorSections(answer)
-        or looksCorrupted(answer)
-        or looksLikeIncompleteErrorField(answer)
-        or finishReason == "length"
-    end
-
-    return false
-  end
-
-  local function rewriteMinLength(inputText)
     local inputLength = #collapseWhitespace(inputText)
-    if inputLength < 120 then
-      return 12
+    local outputLength = #collapseWhitespace(output)
+    if inputLength >= 220 and outputLength < math.max(60, math.floor(inputLength * 0.18)) then
+      return true, "too_short"
     end
 
-    if inputLength < 220 then
-      return 28
-    end
-
-    return math.min(180, math.max(56, math.floor(inputLength * 0.22)))
+    return false, nil
   end
 
-  local function fastSelection(actionName, text)
-    return {
-      action = actionName,
-      role = "fast",
-      model = models.resolveModelForRole("fast"),
-      is_code_like = models.looksLikeCodeOrLog(text),
-      summary = string.format("%s -> %s (fast)", actionName, models.resolveModelForRole("fast")),
-    }
+  local function normalizeErrorExplainText(text)
+    local output = sanitizeModelText(text)
+    if output == "" then
+      return nil
+    end
+
+    local lowered = output:lower()
+    if lowered:find("root cause", 1, true)
+      and lowered:find("immediate fix", 1, true)
+      and lowered:find("what to check next", 1, true)
+    then
+      return output
+    end
+
+    return nil
   end
 
-  local function choosePrimarySelection(spec, payloadContext)
-    local desired = models.describeSelection(spec.action_name, payloadContext.clipboard)
-
-    if desired.role == "fast" then
-      return desired
+  local function isBadErrorExplain(text)
+    local output = sanitizeModelText(text)
+    if output == "" then
+      return true, "empty"
     end
 
-    if status.isModelLoaded(desired.model) then
-      return desired
+    if startsLikeJson(output) then
+      return true, "json_wrapper"
     end
 
-    if config.backend.auto_load_non_fast_models then
-      return desired
+    if looksLikeReasoningLeak(output) then
+      return true, "reasoning_leak"
     end
 
-    return fastSelection(spec.action_name, payloadContext.clipboard)
+    if not normalizeErrorExplainText(output) then
+      return true, "missing_sections"
+    end
+
+    if punctuationDensity(output) > 0.28 then
+      return true, "garbled"
+    end
+
+    return false, nil
   end
 
-  local function runTextAction(spec)
+  local function requestPlainText(profile, prompt, maxTokens, callback)
+    if profile.api == "responses" then
+      client.requestTextResponse({
+        model = profile.model,
+        system = prompt.system,
+        user = prompt.user,
+        max_output_tokens = maxTokens,
+      }, callback)
+      return
+    end
+
+    if profile.api == "native_chat" then
+      client.requestNativeChat({
+        model = profile.model,
+        system = prompt.system,
+        user = prompt.user,
+        max_output_tokens = maxTokens,
+        temperature = 0,
+        reasoning = profile.reasoning,
+      }, callback)
+      return
+    end
+
+    client.requestPlainChatCompletion({
+      model = profile.model,
+      system = prompt.system,
+      user = prompt.user,
+      max_tokens = maxTokens,
+      temperature = 0,
+    }, callback)
+  end
+
+  local function ensureClipboardProfileReady(profile, callback)
+    status.ensureClipboardModel(profile, callback)
+  end
+
+  local function runClipboardAction(spec)
     local payloadContext = buildInstantContext()
     if isBlank(payloadContext.clipboard) then
       showClipboardRequired(spec.label)
       return
     end
 
-    local primarySelection = choosePrimarySelection(spec, payloadContext)
-
-    local function requestInference(modelSelection, prompt, maxTokens, schema, done)
-      client.requestStructuredChatResponse({
-        model = modelSelection.model,
-        system = prompt.system,
-        user = prompt.user,
-        max_tokens = maxTokens or spec.max_output_tokens,
-        schema_name = spec.schema_name,
-        schema = schema or spec.schema,
-        temperature = spec.temperature,
-      }, done)
+    local profile = getActiveClipboardProfile()
+    if not profile then
+      showAlert("Active clipboard profile is invalid.", 2.5)
+      return
     end
 
-    local function handleFinalResult(result, modelSelection)
+    local startedAt = hs.timer.absoluteTime()
+    local prompt = spec.build_prompt(payloadContext)
+
+    local function finishDiagnostics(result)
+      local elapsedMs = math.floor((hs.timer.absoluteTime() - startedAt) / 1000000)
+      recordBakeoff({
+        recorded_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        action = spec.action_name,
+        profile = profile.name,
+        model = profile.model,
+        api = profile.api,
+        success = result.success,
+        latency_ms = elapsedMs,
+        failure_reason = result.failure_reason,
+        preview = result.preview,
+      })
+    end
+
+    local function validate(text)
+      local output = sanitizeModelText(text)
+      if spec.action_name == "summarizeClipboard" then
+        local normalized = normalizeSummaryText(output)
+        if not normalized then
+          return nil, "invalid_summary"
+        end
+        return normalized, nil
+      end
+
+      if spec.action_name == "rewriteClipboardTersely" then
+        local bad, reason = isBadRewrite(payloadContext.clipboard, output)
+        if bad then
+          return nil, reason
+        end
+        return output, nil
+      end
+
+      local bad, reason = isBadErrorExplain(output)
+      if bad then
+        return nil, reason
+      end
+      return normalizeErrorExplainText(output), nil
+    end
+
+    local retried = false
+
+    local function handleResult(result)
+      if not result.ok then
+        status.endBusy()
+        finishDiagnostics({
+          success = false,
+          failure_reason = result.error and result.error.code or "request_failed",
+          preview = result.error and result.error.message or "",
+        })
+        showAlert(formatFailure(spec.label, result, profile), 3)
+        return
+      end
+
+      local normalized, invalidReason = validate(result.data.text)
+      if not normalized and not retried and spec.build_retry_prompt then
+        retried = true
+        local retryPrompt = spec.build_retry_prompt(payloadContext)
+        requestPlainText(profile, retryPrompt, spec.retry_max_tokens or spec.max_tokens, handleResult)
+        return
+      end
+
       status.endBusy()
 
-      if not result.ok then
-        showAlert(formatFailure(spec.label, result), 3)
+      if not normalized then
+        local degradedMessage = spec.label .. " returned degraded output."
+        if invalidReason == "reasoning_leak" and profile.requires_thinking_disabled then
+          degradedMessage = string.format(
+            "%s failed. %s is still in thinking mode. Disable thinking in LM Studio and retry.",
+            spec.label,
+            profile.label
+          )
+        end
+
+        finishDiagnostics({
+          success = false,
+          failure_reason = invalidReason or "invalid_output",
+          preview = previewText(result.data.text or "", 120),
+        })
+        showAlert(degradedMessage, 2.5, result.data.text)
         return
       end
 
-      local normalized = spec.normalize_result(result.data.parsed)
-      if not normalized or trim(normalized) == "" then
-        showAlert(spec.label .. " returned an empty response.", 2.5)
-        return
+      finishDiagnostics({
+        success = true,
+        preview = previewText(normalized, 120),
+      })
+      local successMessage = spec.handle_success(normalized, payloadContext, profile)
+      if not developerModeEnabled() or (config.debug and config.debug.copy_alerts_to_clipboard == false) then
+        copyResult(normalized)
       end
-
-      if isBadStructuredOutput(spec, result.data, normalized, payloadContext) then
-        showAlert(spec.label .. " returned degraded output.", 2.5)
-        return
-      end
-
-      spec.handle_success(normalized, payloadContext, modelSelection, result.data.parsed)
-    end
-
-    local function runFastFallback()
-      local fallbackSelection = fastSelection(spec.action_name, payloadContext.clipboard)
-      local fallbackPrompt = spec.build_prompt(payloadContext)
-      local fallbackSchema = spec.schema_builder and spec.schema_builder(payloadContext, false) or spec.schema
-      requestInference(fallbackSelection, fallbackPrompt, spec.max_output_tokens, fallbackSchema, function(fallbackResult)
-        handleFinalResult(fallbackResult, fallbackSelection)
-      end)
+      showAlert(successMessage, spec.success_seconds, normalized)
     end
 
     status.beginBusy()
-    local retriedForQuality = false
-
-    local function processResult(result, modelSelection)
-      if result.ok then
-        local normalized = spec.normalize_result(result.data.parsed)
-        if isBadStructuredOutput(spec, result.data, normalized, payloadContext) and not retriedForQuality then
-          retriedForQuality = true
-          local retryPrompt = spec.build_retry_prompt and spec.build_retry_prompt(payloadContext) or spec.build_prompt(payloadContext)
-          local retrySchema = spec.schema_builder and spec.schema_builder(payloadContext, true) or spec.schema
-          requestInference(
-            modelSelection,
-            retryPrompt,
-            spec.retry_max_output_tokens or spec.max_output_tokens,
-            retrySchema,
-            function(retryResult)
-              processResult(retryResult, modelSelection)
-            end
-          )
-          return
-        end
-      end
-
-      handleFinalResult(result, modelSelection)
-    end
-
-    local primaryPrompt = spec.build_prompt(payloadContext)
-    local primarySchema = spec.schema_builder and spec.schema_builder(payloadContext, false) or spec.schema
-
-    requestInference(primarySelection, primaryPrompt, spec.max_output_tokens, primarySchema, function(initialResult)
-      if initialResult.ok or not shouldRetryWithModelLoad(initialResult) then
-        if not initialResult.ok and spec.allow_fast_fallback and shouldFallbackToFast(initialResult) then
-          runFastFallback()
-          return
-        end
-
-        processResult(initialResult, primarySelection)
+    ensureClipboardProfileReady(profile, function(ensureResult)
+      if not ensureResult.ok then
+        status.endBusy()
+        finishDiagnostics({
+          success = false,
+          failure_reason = ensureResult.error and ensureResult.error.code or "prepare_failed",
+          preview = ensureResult.error and ensureResult.error.message or "",
+        })
+        showAlert(formatFailure(spec.label, ensureResult, profile), 3)
         return
       end
 
-      status.ensureModelReady(primarySelection.model, primarySelection.role, {
-        onWarning = showColdStartWarning,
-      }, function(ensureResult)
-        if not ensureResult.ok then
-          if spec.allow_fast_fallback and shouldFallbackToFast(ensureResult) then
-            runFastFallback()
-            return
-          end
-
-          handleFinalResult(ensureResult, primarySelection)
-          return
-        end
-
-        requestInference(primarySelection, primaryPrompt, spec.max_output_tokens, primarySchema, function(retriedResult)
-          if not retriedResult.ok and spec.allow_fast_fallback and shouldFallbackToFast(retriedResult) then
-            runFastFallback()
-            return
-          end
-
-          processResult(retriedResult, primarySelection)
-        end)
-      end)
+      requestPlainText(profile, prompt, spec.max_tokens, handleResult)
     end)
   end
 
   function self.summarizeClipboard()
-    runTextAction({
+    runClipboardAction({
       action_name = "summarizeClipboard",
       label = "Summarize Clipboard",
-      max_output_tokens = 400,
-      temperature = 0,
-      schema_name = "clipboard_summary",
-      schema = {
-        type = "object",
-        properties = {
-          bullets = {
-            type = "array",
-            items = { type = "string" },
-            minItems = 1,
-            maxItems = 3,
-          },
-        },
-        required = { "bullets" },
-        additionalProperties = false,
-      },
+      max_tokens = 240,
+      retry_max_tokens = 320,
       build_prompt = prompts.buildSummaryPrompt,
-      normalize_result = function(parsed)
-        local bullets = {}
-        for _, bullet in ipairs(parsed.bullets or {}) do
-          local cleaned = trim(bullet)
-          if cleaned ~= "" then
-            table.insert(bullets, "- " .. cleaned)
-          end
-        end
-        return table.concat(bullets, "\n")
-      end,
-      handle_success = function(text, payloadContext)
-        copyResult(text)
-        local message = "Summary copied to clipboard."
+      success_seconds = 3,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Summary copied to clipboard using %s.", profile.label)
         if payloadContext.truncated then
           message = message .. " Input was truncated."
         end
@@ -478,46 +573,22 @@ function M.new(deps)
         if preview ~= "" then
           message = message .. "\n" .. preview
         end
-
-        showAlert(message, 3)
+        return message
       end,
     })
   end
 
   function self.rewriteClipboardTersely()
-    runTextAction({
+    runClipboardAction({
       action_name = "rewriteClipboardTersely",
       label = "Rewrite Clipboard Tersely",
-      max_output_tokens = 900,
-      retry_max_output_tokens = 1200,
-      temperature = 0,
-      schema_name = "clipboard_rewrite",
-      schema_builder = function(payloadContext, isRetry)
-        local minLength = rewriteMinLength(payloadContext.clipboard)
-        if isRetry then
-          minLength = math.max(minLength, math.min(260, math.floor(#collapseWhitespace(payloadContext.clipboard) * 0.3)))
-        end
-
-        return {
-          type = "object",
-          properties = {
-            text = {
-              type = "string",
-              minLength = minLength,
-            },
-          },
-          required = { "text" },
-          additionalProperties = false,
-        }
-      end,
+      max_tokens = 650,
+      retry_max_tokens = 900,
       build_prompt = prompts.buildRewritePrompt,
       build_retry_prompt = prompts.buildRewriteRetryPrompt,
-      normalize_result = function(parsed)
-        return trim(parsed.text or "")
-      end,
-      handle_success = function(text, payloadContext)
-        copyResult(text)
-        local message = "Rewritten text copied to clipboard."
+      success_seconds = 3,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Rewritten text copied to clipboard using %s.", profile.label)
         if payloadContext.truncated then
           message = message .. " Input was truncated."
         end
@@ -526,45 +597,22 @@ function M.new(deps)
         if preview ~= "" then
           message = message .. "\n" .. preview
         end
-
-        showAlert(message, 3)
+        return message
       end,
     })
   end
 
   function self.explainClipboardError()
-    runTextAction({
+    runClipboardAction({
       action_name = "explainClipboardError",
       label = "Explain Clipboard Error",
-      max_output_tokens = 1100,
-      retry_max_output_tokens = 1400,
-      temperature = 0,
-      allow_fast_fallback = true,
-      schema_name = "clipboard_error_explanation",
-      schema_builder = function(_, isRetry)
-        local minLength = isRetry and 40 or 28
-        return {
-          type = "object",
-          properties = {
-            text = { type = "string", minLength = minLength * 3 },
-          },
-          required = { "text" },
-          additionalProperties = false,
-        }
-      end,
+      max_tokens = 520,
+      retry_max_tokens = 720,
       build_prompt = prompts.buildErrorExplainPrompt,
       build_retry_prompt = prompts.buildErrorExplainRetryPrompt,
-      normalize_result = function(parsed)
-        return trim(parsed.text or "")
-      end,
-      handle_success = function(text, payloadContext, modelSelection)
-        copyResult(text)
-        local message = "Error explanation copied to clipboard."
-        if modelSelection.role == "code" then
-          message = message .. " Used code model."
-        else
-          message = message .. " Used fast fallback model."
-        end
+      success_seconds = 3.5,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Error explanation copied to clipboard using %s.", profile.label)
         if payloadContext.truncated then
           message = message .. " Input was truncated."
         end
@@ -573,10 +621,81 @@ function M.new(deps)
         if preview ~= "" then
           message = message .. "\n" .. preview
         end
-
-        showAlert(message, 3.5)
+        return message
       end,
     })
+  end
+
+  function self.prepareClipboardModel()
+    local profile = getActiveClipboardProfile()
+    if not profile then
+      showAlert("Active clipboard profile is invalid.", 2.5)
+      return
+    end
+
+    status.beginBusy()
+    status.prepareClipboardModel(profile, function(result)
+      status.endBusy()
+
+      if not result.ok then
+      showAlert(formatFailure("Prepare Clipboard Model", result, profile), 3.5)
+        return
+      end
+
+      local unloaded = {}
+      for _, item in ipairs(result.data.unloaded or {}) do
+        if item.model then
+          table.insert(unloaded, item.model)
+        end
+      end
+
+      local message = result.data.already_prepared
+        and string.format("%s was already loaded and is prepared.", profile.label)
+        or string.format("Prepared %s.", profile.label)
+      if #unloaded > 0 then
+        message = message .. "\nUnloaded: " .. table.concat(unloaded, ", ")
+      end
+
+      local loadedNow = {}
+      for _, item in ipairs(result.data.loaded_instances or {}) do
+        if item.model then
+          table.insert(loadedNow, item.model)
+        end
+      end
+
+      if #loadedNow > 0 then
+        message = message .. "\nLoaded: " .. table.concat(loadedNow, ", ")
+      end
+
+      if profile.requires_thinking_disabled then
+        message = message .. "\nReminder: disable thinking for this profile in LM Studio."
+      end
+
+      showAlert(message, 4)
+    end)
+  end
+
+  function self.useClipboardProfile(profileName)
+    local ok = status.setActiveClipboardProfile(profileName)
+    if not ok then
+      showAlert("Unknown clipboard profile: " .. tostring(profileName), 2.5)
+      return
+    end
+
+    local profile = getActiveClipboardProfile()
+    local message = string.format("Active clipboard profile: %s", profile.label)
+    if profile.requires_thinking_disabled then
+      message = message .. "\nReminder: disable thinking in LM Studio."
+    end
+    showAlert(message, 2.5)
+  end
+
+  function self.toggleDeveloperMode()
+    local enabled = status.toggleDeveloperMode()
+    local message = enabled
+      and "Developer Mode enabled.\nAlerts stay on screen longer and are copied to the clipboard."
+      or "Developer Mode disabled."
+    showAlert(message, 2.5)
   end
 
   function self.draftUtilityScript()
@@ -600,7 +719,28 @@ function M.new(deps)
       end
 
       if result.ok then
-        showAlert("Backend status refreshed.", 1.5)
+        local snapshot = status.getStatusSnapshot()
+        local profile = getActiveClipboardProfile()
+        local loaded = {}
+        for _, item in ipairs(snapshot.loaded_instances or {}) do
+          if item.model then
+            table.insert(loaded, item.model)
+          end
+        end
+
+        local lines = {
+          "Backend status refreshed.",
+          "Clipboard profile: " .. (profile and profile.label or "Unknown"),
+          "Chat completions: " .. tostring(snapshot.chat_available),
+          "Responses: " .. tostring(snapshot.responses_available),
+          "Native unload: " .. tostring(snapshot.unload_available),
+        }
+
+        if #loaded > 0 then
+          table.insert(lines, "Loaded: " .. table.concat(loaded, ", "))
+        end
+
+        showAlert(table.concat(lines, "\n"), 3.5)
       else
         local message = result.error and result.error.message or "Backend refresh failed"
         showAlert(message, 2)

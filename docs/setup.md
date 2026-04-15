@@ -9,9 +9,10 @@ The current implemented checkpoint provides:
 - `init.lua` bootstrap and reload watcher
 - shared configuration in `config.lua`
 - core modules under `llm/`
-- a menubar item and placeholder hotkeys
-
-The user-facing model actions are not implemented yet in this checkpoint.
+- clipboard actions with explicit clipboard model profiles
+- a menubar item and configurable hotkeys
+- explicit `Prepare Clipboard Model` flow for safe model switching
+- diagnostics capture for clipboard bake-off runs
 
 ## Planned setup flow
 
@@ -28,4 +29,9 @@ The user-facing model actions are not implemented yet in this checkpoint.
 - The eventual harness will talk to a local LM Studio server over HTTP.
 - Script drafting will save generated scripts locally for review rather than executing them automatically.
 - `config.local.lua` is intentionally untracked and should be used for any machine-specific paths, URLs, bundle IDs, or tokens.
-- The default policy now favors `openai/gpt-oss-20b` for clipboard actions and does not auto-load non-fast models unless you explicitly opt into that in `config.local.lua`.
+- Clipboard actions now use one explicit active clipboard profile at a time:
+  - `glm` uses `/v1/chat/completions`
+  - `gpt_oss` uses `/v1/responses`
+- The initial bake-off baseline is `clipboard.active_profile = "glm"`, but that is not intended to be the permanent default until both profiles are tested.
+- By default, normal clipboard actions do not silently switch models. Use `Prepare Clipboard Model` or enable `backend.manage_clipboard_model` in `config.local.lua` if you want managed switching.
+- Diagnostics for bake-off runs are written outside the repo to `storage.diagnostics_dir` when `clipboard.bakeoff_mode = true`.

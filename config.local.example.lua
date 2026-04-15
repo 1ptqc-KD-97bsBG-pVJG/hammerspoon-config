@@ -3,19 +3,23 @@ return {
     -- Example:
     -- openai_base = "http://mac-mini.local:1234/v1",
     -- native_base = "http://mac-mini.local:1234/api/v1",
-    -- auto_load_non_fast_models = true,
+    -- manage_clipboard_model = true,
+  },
+  clipboard = {
+    -- Example:
+    -- active_profile = "gpt_oss",
+    -- bakeoff_mode = true,
+    -- profiles = {
+    --   glm = { requires_thinking_disabled = true },
+    -- },
   },
   ui = {
     -- Example:
     -- primary_browser_bundle_id = "app.zen-browser.zen",
   },
-  models = {
-    -- Example:
-    -- fast = "openai/gpt-oss-20b",
-    -- code = "qwen/qwen3-coder-next",
-  },
   storage = {
     -- Example:
     -- output_dir = "~/Documents/my-harness/output",
+    -- diagnostics_dir = "~/Documents/my-harness/diagnostics",
   },
 }

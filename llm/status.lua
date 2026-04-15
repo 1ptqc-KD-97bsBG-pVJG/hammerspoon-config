@@ -10,7 +10,15 @@ local function shallowCopy(value)
     if type(item) == "table" then
       local nested = {}
       for nestedKey, nestedValue in pairs(item) do
-        nested[nestedKey] = nestedValue
+        if type(nestedValue) == "table" then
+          local nestedCopy = {}
+          for k, v in pairs(nestedValue) do
+            nestedCopy[k] = v
+          end
+          nested[nestedKey] = nestedCopy
+        else
+          nested[nestedKey] = nestedValue
+        end
       end
       copy[key] = nested
     else
@@ -30,111 +38,173 @@ local function contains(list, target)
   return false
 end
 
-local function appendUnique(list, value)
-  local updated = {}
-  for _, item in ipairs(list or {}) do
-    table.insert(updated, item)
-  end
-
-  if not contains(updated, value) then
-    table.insert(updated, value)
-  end
-
-  return updated
+local function trim(value)
+  return (value or ""):match("^%s*(.-)%s*$")
 end
 
-local function removeValues(list, removals)
-  local updated = {}
-  for _, item in ipairs(list or {}) do
-    if not contains(removals, item) then
-      table.insert(updated, item)
-    end
+local function normalizeModelId(value)
+  local text = trim(value)
+  if text == "" then
+    return nil
   end
-  return updated
+
+  return (text:gsub(":%d+$", ""))
 end
 
-local function listModelIds(payload)
-  if type(payload) ~= "table" then
-    return {}
+local function extractModelIdentifier(item)
+  if type(item) ~= "table" then
+    return nil
   end
 
-  local source = payload.data or payload.models or payload
-  local ids = {}
-  if type(source) ~= "table" then
-    return ids
-  end
-
-  for _, item in ipairs(source) do
-    if type(item) == "table" then
-      local identifier = item.id or item.model or item.identifier
-      if identifier then
-        table.insert(ids, identifier)
-      end
-    elseif type(item) == "string" then
-      table.insert(ids, item)
-    end
-  end
-
-  return ids
+  return normalizeModelId(item.key)
+    or normalizeModelId(item.model)
+    or normalizeModelId(item.model_key)
+    or normalizeModelId(item.identifier)
+    or normalizeModelId(item.id)
+    or normalizeModelId(item.path)
 end
 
-local function hasNativeLoadMetadata(payload)
-  if type(payload) ~= "table" then
+local function extractInstanceId(item)
+  if type(item) ~= "table" then
+    return nil
+  end
+
+  return item.instance_id or item.instanceId or item.id
+end
+
+local function isLoadedItem(item)
+  if type(item) ~= "table" then
     return false
   end
 
-  local source = payload.data or payload.models or payload
-  if type(source) ~= "table" then
-    return false
+  if item.loaded == true
+    or item.is_loaded == true
+    or item.state == "loaded"
+    or item.status == "loaded"
+    or item.active == true
+    or item.current == true
+  then
+    return true
   end
 
-  for _, item in ipairs(source) do
-    if type(item) == "table" then
-      if item.loaded ~= nil
-        or item.is_loaded ~= nil
-        or item.state ~= nil
-        or item.status ~= nil
-        or item.active ~= nil
-        or item.current ~= nil
-      then
-        return true
-      end
-    end
+  if extractInstanceId(item) and item.loaded == nil and item.is_loaded == nil and item.state == nil and item.status == nil then
+    return true
   end
 
   return false
 end
 
-local function listLoadedNativeModels(payload)
-  if type(payload) ~= "table" then
-    return {}
+local function parseNativeModels(payload)
+  local availableModels = {}
+  local loadedModels = {}
+  local loadedInstances = {}
+
+  local function addAvailable(modelId)
+    if modelId and not contains(availableModels, modelId) then
+      table.insert(availableModels, modelId)
+    end
   end
 
-  local source = payload.data or payload.models or payload
-  local ids = {}
-  if type(source) ~= "table" then
-    return ids
+  local function addLoadedInstance(modelId, instanceId, label)
+    if modelId and not contains(loadedModels, modelId) then
+      table.insert(loadedModels, modelId)
+    end
+
+    local duplicate = false
+    for _, item in ipairs(loadedInstances) do
+      if item.instance_id == instanceId and item.model == modelId then
+        duplicate = true
+        break
+      end
+    end
+
+    if not duplicate then
+      table.insert(loadedInstances, {
+        instance_id = instanceId,
+        model = modelId,
+        label = label,
+      })
+    end
   end
 
-  for _, item in ipairs(source) do
-    if type(item) == "table" then
-      local loaded = item.loaded == true
-        or item.is_loaded == true
-        or item.state == "loaded"
-        or item.status == "loaded"
-        or item.active == true
-        or item.current == true
-      if loaded then
-        local identifier = item.id or item.model or item.identifier
-        if identifier then
-          table.insert(ids, identifier)
+  local visited = {}
+  local function walk(node, parentModelId, parentLabel)
+    if type(node) ~= "table" or visited[node] then
+      return
+    end
+    visited[node] = true
+
+    local modelId = extractModelIdentifier(node) or parentModelId
+    local label = trim(node.display_name or node.name or node.identifier or parentLabel or modelId or "Unknown")
+    addAvailable(modelId)
+
+    local nestedLoaded = node.loaded_instances
+    if type(nestedLoaded) == "table" then
+      for _, loaded in ipairs(nestedLoaded) do
+        local loadedModelId = modelId or extractModelIdentifier(loaded)
+        local instanceId = extractInstanceId(loaded)
+        addAvailable(loadedModelId)
+        if loadedModelId and instanceId and trim(instanceId) ~= "" then
+          addLoadedInstance(loadedModelId, instanceId, label)
+        end
+      end
+    end
+
+    if isLoadedItem(node) and modelId then
+      addLoadedInstance(modelId, extractInstanceId(node), label)
+    end
+
+    for key, child in pairs(node) do
+      if key ~= "loaded_instances" then
+        if type(child) == "table" then
+          walk(child, modelId, label)
+        elseif type(child) == "string" then
+          local normalized = normalizeModelId(child)
+          if normalized and normalized:find("/", 1, true) then
+            addAvailable(normalized)
+          end
         end
       end
     end
   end
 
-  return ids
+  walk(payload and (payload.data or payload.models or payload) or {}, nil, nil)
+
+  return {
+    available_models = availableModels,
+    loaded_models = loadedModels,
+    loaded_instances = loadedInstances,
+  }
 end
+
+local function parseOpenAIModels(payload)
+  local source = payload and (payload.data or payload.models or payload) or {}
+  local availableModels = {}
+
+  if type(source) ~= "table" then
+    return availableModels
+  end
+
+  for _, item in ipairs(source) do
+    if type(item) == "table" then
+      local modelId = extractModelIdentifier(item)
+      if modelId and not contains(availableModels, modelId) then
+        table.insert(availableModels, modelId)
+      end
+    elseif type(item) == "string" then
+      if not contains(availableModels, item) then
+        table.insert(availableModels, item)
+      end
+    end
+  end
+
+  return availableModels
+end
+
+M._test = {
+  parseNativeModels = parseNativeModels,
+  parseOpenAIModels = parseOpenAIModels,
+}
 
 function M.new(config, client)
   local changeListener = nil
@@ -142,12 +212,19 @@ function M.new(config, client)
   local state = {
     reachable = false,
     native_available = false,
+    unload_available = nil,
+    responses_available = nil,
+    chat_available = nil,
+    native_chat_available = nil,
     last_checked_at = nil,
     loaded_models = {},
+    loaded_instances = {},
     available_models = {},
     busy = false,
     last_error = nil,
     last_status_source = nil,
+    active_clipboard_profile = config.clipboard.active_profile,
+    developer_mode = config.debug and config.debug.developer_mode == true or false,
   }
 
   local function notify()
@@ -173,9 +250,30 @@ function M.new(config, client)
     return shallowCopy(state)
   end
 
-  function self.setBusy(isBusy)
-    busyCount = isBusy and 1 or 0
-    applySnapshot({ busy = isBusy })
+  function self.getActiveClipboardProfile()
+    return state.active_clipboard_profile
+  end
+
+  function self.setActiveClipboardProfile(profileName)
+    if type(config.clipboard.profiles[profileName]) ~= "table" then
+      return false
+    end
+
+    applySnapshot({ active_clipboard_profile = profileName })
+    return true
+  end
+
+  function self.getDeveloperMode()
+    return state.developer_mode == true
+  end
+
+  function self.setDeveloperMode(enabled)
+    applySnapshot({ developer_mode = enabled == true })
+    return state.developer_mode
+  end
+
+  function self.toggleDeveloperMode()
+    return self.setDeveloperMode(not self.getDeveloperMode())
   end
 
   function self.beginBusy()
@@ -192,82 +290,133 @@ function M.new(config, client)
     return contains(state.loaded_models, modelId)
   end
 
-  function self.isModelKnown(modelId)
-    return contains(state.available_models, modelId)
+  function self.getLoadedInstances()
+    local instances = {}
+    for _, item in ipairs(state.loaded_instances or {}) do
+      table.insert(instances, {
+        instance_id = item.instance_id,
+        model = item.model,
+        label = item.label,
+      })
+    end
+    return instances
   end
 
-  function self.canAutoLoadRole(role)
-    if role == "fast" then
-      return config.backend.auto_load_fast_model
+  function self.isClipboardProfilePrepared(profile)
+    if not profile then
+      return false
     end
 
-    return config.backend.auto_load_non_fast_models
+    if #state.loaded_instances == 1 and state.loaded_instances[1].model == profile.model then
+      return true
+    end
+
+    if #state.loaded_instances == 0 and #state.loaded_models == 1 and state.loaded_models[1] == profile.model then
+      return true
+    end
+
+    return false
+  end
+
+  local function probeUnloadEndpoint(callback)
+    client.requestJson({
+      url = config.backend.native_base .. "/models/unload",
+      method = "POST",
+      payload = { instance_id = "__probe__" },
+      timeout_ms = config.backend.status_timeout_ms,
+    }, function(result)
+      if result.ok then
+        callback(true)
+        return
+      end
+
+      local status = result.error and result.error.status or nil
+      if status == 400 or status == 401 or status == 422 then
+        callback(true)
+        return
+      end
+
+      if status == 404 or status == 405 then
+        callback(false)
+        return
+      end
+
+      callback(nil)
+    end)
   end
 
   function self.refreshStatus(callback)
     client.listNativeModels(function(nativeResult)
+      local nativeParsed = nil
+
       if nativeResult.ok then
-        local explicitLoadedModels = listLoadedNativeModels(nativeResult.data)
-        local loadedModels = explicitLoadedModels
-        if not hasNativeLoadMetadata(nativeResult.data) and #state.loaded_models > 0 then
-          loadedModels = state.loaded_models
-        end
-
-        applySnapshot({
-          reachable = true,
-          native_available = true,
-          available_models = listModelIds(nativeResult.data),
-          loaded_models = loadedModels,
-          last_checked_at = isoNow(),
-          last_error = nil,
-          last_status_source = "native",
-        })
-
-        if callback then
-          callback({ ok = true, data = self.getStatusSnapshot() })
-        end
-        return
+        nativeParsed = parseNativeModels(nativeResult.data)
       end
 
       client.listModels(function(openAIResult)
-        if openAIResult.ok then
-          applySnapshot({
-            reachable = true,
-            native_available = false,
-            available_models = listModelIds(openAIResult.data),
-            loaded_models = {},
-            last_checked_at = isoNow(),
-            last_error = nil,
-            last_status_source = "openai",
-          })
+        local reachable = openAIResult.ok or nativeResult.ok
+        local availableModels = {}
+        local source = nil
 
-          if callback then
-            callback({ ok = true, data = self.getStatusSnapshot() })
-          end
-          return
+        if nativeParsed then
+          availableModels = nativeParsed.available_models
+          source = "native"
+        elseif openAIResult.ok then
+          availableModels = parseOpenAIModels(openAIResult.data)
+          source = "openai"
         end
 
-        local failureMessage = openAIResult.error and openAIResult.error.message or "Backend is unreachable"
-        applySnapshot({
-          reachable = false,
-          native_available = false,
-          available_models = {},
-          loaded_models = {},
-          last_checked_at = isoNow(),
-          last_error = failureMessage,
-          last_status_source = nil,
-        })
+        client.probePostEndpoint("/chat/completions", function(chatProbe)
+          client.probePostEndpoint("/responses", function(responsesProbe)
+            client.probeNativePostEndpoint("/chat", function(nativeChatProbe)
+              local finalize = function(unloadAvailable)
+              applySnapshot({
+                reachable = reachable,
+                native_available = nativeResult.ok,
+                unload_available = unloadAvailable,
+                responses_available = responsesProbe.ok and responsesProbe.data.available or false,
+                chat_available = chatProbe.ok and chatProbe.data.available or false,
+                native_chat_available = nativeChatProbe.ok and nativeChatProbe.data.available or false,
+                available_models = availableModels,
+                loaded_models = nativeParsed and nativeParsed.loaded_models or {},
+                loaded_instances = nativeParsed and nativeParsed.loaded_instances or {},
+                last_checked_at = isoNow(),
+                last_error = reachable and nil or (openAIResult.error and openAIResult.error.message or nativeResult.error and nativeResult.error.message or "Backend is unreachable"),
+                last_status_source = source,
+              })
 
-        if callback then
-          callback(openAIResult)
-        end
+              if callback then
+                callback(reachable and { ok = true, data = self.getStatusSnapshot() } or openAIResult.ok and { ok = true, data = self.getStatusSnapshot() } or nativeResult)
+              end
+            end
+
+            if nativeResult.ok then
+              probeUnloadEndpoint(finalize)
+            else
+              finalize(false)
+            end
+            end)
+          end)
+        end)
       end)
     end)
   end
 
-  local function unloadModels(modelIds, callback)
-    if type(modelIds) ~= "table" or #modelIds == 0 then
+  local function unloadInstances(instances, callback)
+    if type(instances) ~= "table" or #instances == 0 then
       callback({ ok = true, data = { unloaded = {} } })
+      return
+    end
+
+    if state.unload_available == false then
+      callback({
+        ok = false,
+        error = {
+          code = "native_unload_unavailable",
+          message = "Native unload endpoint is unavailable",
+          detail = "Unload loaded models manually in LM Studio before preparing the clipboard model.",
+        },
+      })
       return
     end
 
@@ -275,42 +424,31 @@ function M.new(config, client)
     local unloaded = {}
 
     local function unloadNext()
-      local modelId = modelIds[index]
-      if not modelId then
-        applySnapshot({
-          loaded_models = removeValues(state.loaded_models, unloaded),
-          last_error = nil,
-        })
+      local instance = instances[index]
+      if not instance then
         callback({ ok = true, data = { unloaded = unloaded } })
         return
       end
 
-      client.unloadModel(modelId, function(result)
-        if not result.ok then
-          local detail = tostring(result.error and result.error.detail or "")
-          local message = tostring(result.error and result.error.message or "")
-          local combined = (message .. " " .. detail):lower()
-          if combined:find("404", 1, true)
-            or combined:find("not found", 1, true)
-            or combined:find("unknown route", 1, true)
-            or combined:find("method not allowed", 1, true)
-          then
-            callback({
-              ok = false,
-              error = {
-                code = "native_unload_unavailable",
-                message = "Native unload endpoint is unavailable",
-                detail = combined,
-              },
-            })
-            return
-          end
+      if not instance.instance_id or trim(instance.instance_id) == "" then
+        callback({
+          ok = false,
+          error = {
+            code = "missing_instance_id",
+            message = "A loaded model instance is missing instance_id",
+            detail = instance.model or "unknown",
+          },
+        })
+        return
+      end
 
+      client.unloadModelInstance(instance.instance_id, function(result)
+        if not result.ok then
           callback(result)
           return
         end
 
-        table.insert(unloaded, modelId)
+        table.insert(unloaded, instance)
         index = index + 1
         unloadNext()
       end)
@@ -319,125 +457,159 @@ function M.new(config, client)
     unloadNext()
   end
 
-  local function continueEnsureModelReady(modelId, role, opts, callback)
+  function self.prepareClipboardModel(profile, callback)
     if not config.backend.enable_native_model_management then
       callback({
-        ok = true,
-        data = {
-          model = modelId,
-          loaded = false,
-          skipped = true,
-          reason = "native_management_disabled",
+        ok = false,
+        error = {
+          code = "native_management_disabled",
+          message = "Native model management is disabled",
+          detail = "Enable backend.enable_native_model_management to prepare clipboard models.",
         },
       })
       return
     end
 
-    if not self.canAutoLoadRole(role) then
-      callback({
-        ok = true,
-        data = {
-          model = modelId,
-          loaded = false,
-          skipped = true,
-          reason = "auto_load_disabled_for_role",
-        },
-      })
-      return
-    end
-
-    if not state.native_available then
-      callback({
-        ok = true,
-        data = {
-          model = modelId,
-          loaded = false,
-          skipped = true,
-          reason = "native_management_unavailable",
-        },
-      })
-      return
-    end
-
-    if self.isModelLoaded(modelId) then
-      callback({ ok = true, data = { model = modelId, loaded = true, already_loaded = true } })
-      return
-    end
-
-    local function proceedToLoad()
-      if opts.onWarning and role ~= "fast" then
-        opts.onWarning(modelId, role)
+    self.refreshStatus(function(refreshResult)
+      if not refreshResult.ok then
+        callback(refreshResult)
+        return
       end
 
-      client.loadModel(modelId, function(loadResult)
-        if not loadResult.ok then
-          callback(loadResult)
-          return
-        end
-
-        applySnapshot({
-          loaded_models = appendUnique(state.loaded_models, modelId),
-          last_error = nil,
+      if not state.native_available then
+        callback({
+          ok = false,
+          error = {
+            code = "native_management_unavailable",
+            message = "Native model management is unavailable",
+            detail = "LM Studio native /api/v1/models endpoints were not reachable.",
+          },
         })
+        return
+      end
 
-        self.refreshStatus(function(refreshResult)
-          if refreshResult and refreshResult.ok then
-            callback({ ok = true, data = { model = modelId, loaded = true, refreshed = true } })
-            return
-          end
+      if #state.loaded_models > 1 and #state.loaded_instances == 0 then
+        callback({
+          ok = false,
+          error = {
+            code = "loaded_models_missing_instances",
+            message = "Loaded models were detected, but instance IDs were not available",
+            detail = "Unload models manually in LM Studio before preparing the clipboard model.",
+          },
+        })
+        return
+      end
 
-          callback({ ok = true, data = { model = modelId, loaded = true, refresh_failed = true } })
-        end)
-      end)
-    end
+      local alreadyPrepared = self.isClipboardProfilePrepared(profile)
 
-    if config.backend.unload_other_models_before_load and #state.loaded_models > 0 then
-      unloadModels(state.loaded_models, function(unloadResult)
+      if alreadyPrepared then
+        callback({
+          ok = true,
+          data = {
+            prepared = true,
+            already_prepared = true,
+            profile = profile.name,
+            model = profile.model,
+            unloaded = {},
+            loaded_instances = self.getLoadedInstances(),
+          },
+        })
+        return
+      end
+
+      if #state.loaded_instances == 0 and #state.loaded_models == 1 and state.loaded_models[1] == profile.model then
+        callback({
+          ok = true,
+          data = {
+            prepared = true,
+            already_prepared = true,
+            profile = profile.name,
+            model = profile.model,
+            unloaded = {},
+            loaded_instances = self.getLoadedInstances(),
+          },
+        })
+        return
+      end
+
+      unloadInstances(self.getLoadedInstances(), function(unloadResult)
         if not unloadResult.ok then
           callback(unloadResult)
           return
         end
 
-        proceedToLoad()
-      end)
-      return
-    end
+        client.loadModel(profile.model, config.backend.clipboard_ttl_s, function(loadResult)
+          if not loadResult.ok then
+            callback(loadResult)
+            return
+          end
 
-    proceedToLoad()
+          self.refreshStatus(function(postRefresh)
+            if not postRefresh.ok then
+              callback(postRefresh)
+              return
+            end
+
+            callback({
+              ok = true,
+              data = {
+                prepared = self.isModelLoaded(profile.model),
+                profile = profile.name,
+                model = profile.model,
+                unloaded = unloadResult.data.unloaded,
+                loaded_instances = self.getLoadedInstances(),
+              },
+            })
+          end)
+        end)
+      end)
+    end)
   end
 
-  function self.ensureModelReady(modelId, role, opts, callback)
-    opts = opts or {}
-    local shouldRefreshFirst = opts.force_refresh == true or state.last_checked_at == nil
-
-    if shouldRefreshFirst then
-      self.refreshStatus(function(refreshResult)
-        if refreshResult and not refreshResult.ok and config.backend.enable_native_model_management then
-          callback(refreshResult)
-          return
-        end
-
-        continueEnsureModelReady(modelId, role, opts, callback)
-      end)
-      return
-    end
-
-    continueEnsureModelReady(modelId, role, opts, callback)
-  end
-
-  function self.withModelReady(modelSelection, opts, requestFn, callback)
-    self.beginBusy()
-    self.ensureModelReady(modelSelection.model, modelSelection.role, opts, function(ensureResult)
-      if not ensureResult.ok then
-        self.endBusy()
-        callback(ensureResult)
+  function self.ensureClipboardModel(profile, callback)
+    self.refreshStatus(function(refreshResult)
+      if not refreshResult.ok then
+        callback(refreshResult)
         return
       end
 
-      requestFn(function(result)
-        self.endBusy()
-        callback(result)
-      end)
+      if self.isClipboardProfilePrepared(profile) then
+        callback({
+          ok = true,
+          data = {
+            prepared = true,
+            model = profile.model,
+            profile = profile.name,
+          },
+        })
+        return
+      end
+
+      if self.isModelLoaded(profile.model) and (#state.loaded_instances > 1 or #state.loaded_models > 1) then
+        callback({
+          ok = false,
+          error = {
+            code = "multiple_models_loaded",
+            message = "Multiple models are currently loaded",
+            detail = "Run Prepare Clipboard Model so the clipboard profile is the only loaded model.",
+          },
+        })
+        return
+      end
+
+      if not config.backend.manage_clipboard_model then
+        callback({
+          ok = false,
+          error = {
+            code = "clipboard_model_not_prepared",
+            message = "Clipboard model is not prepared",
+            detail = string.format("Run Prepare Clipboard Model for %s first.", profile.label),
+          },
+        })
+        return
+      end
+
+      self.prepareClipboardModel(profile, callback)
     end)
   end
 

@@ -79,6 +79,7 @@ function M.new(config)
       config.storage.output_dir,
       config.storage.handoff_dir,
       config.storage.script_drafts_dir,
+      config.storage.diagnostics_dir,
       dirname(config.storage.inbox_file),
     }
 
@@ -185,6 +186,41 @@ function M.new(config)
       data = {
         code_path = codePath,
         note_path = notePath,
+      },
+    }
+  end
+
+  function self.appendDiagnosticRecord(record)
+    local filename = string.format("%s-bakeoff.jsonl", os.date("%Y%m%d"))
+    local path = string.format("%s/%s", config.storage.diagnostics_dir, filename)
+    local ok, encoded = pcall(hs.json.encode, record)
+    if not ok then
+      return {
+        ok = false,
+        error = {
+          code = "diagnostic_encode_failed",
+          message = "Failed to encode diagnostic record",
+          detail = encoded,
+        },
+      }
+    end
+
+    local writeOk, writeError = writeFile(path, encoded .. "\n", "a")
+    if not writeOk then
+      return {
+        ok = false,
+        error = {
+          code = "diagnostic_write_failed",
+          message = "Failed to write diagnostic record",
+          detail = writeError,
+        },
+      }
+    end
+
+    return {
+      ok = true,
+      data = {
+        path = path,
       },
     }
   end

@@ -13,6 +13,8 @@ local M = {
     auto_load_fast_model = true,
     auto_load_non_fast_models = false,
     unload_other_models_before_load = true,
+    manage_clipboard_model = false,
+    clipboard_ttl_s = 0,
   },
   models = {
     fast = "openai/gpt-oss-20b",
@@ -21,12 +23,32 @@ local M = {
     vision = "qwen/qwen3-vl-8b",
     background = "zai-org/glm-4.7-flash",
   },
+  clipboard = {
+    active_profile = "glm",
+    bakeoff_mode = false,
+    profiles = {
+      glm = {
+        label = "GLM 4.7 Flash",
+        model = "zai-org/glm-4.7-flash",
+        api = "native_chat",
+        reasoning = "off",
+        requires_thinking_disabled = false,
+      },
+      gpt_oss = {
+        label = "GPT OSS 20B",
+        model = "openai/gpt-oss-20b",
+        api = "responses",
+        requires_thinking_disabled = false,
+      },
+    },
+  },
   ui = {
     modifier = { "cmd", "alt", "ctrl" },
     hotkeys = {
       summarize = "S",
       explain_error = "E",
       rewrite_terse = "R",
+      prepare_clipboard_model = "P",
       draft_script = "G",
       open_webui = "O",
       save_summary = "W",
@@ -35,11 +57,19 @@ local M = {
     primary_browser_bundle_id = nil,
     open_webui_url = "http://localhost:3000",
   },
+  debug = {
+    developer_mode = true,
+    alert_seconds = 5,
+    developer_alert_seconds = 15,
+    copy_alerts_to_clipboard = true,
+    clipboard_sequence_delay_s = 0.2,
+  },
   storage = {
     output_dir = home .. "/Documents/hammerspoon-lm/output",
     inbox_file = home .. "/Documents/hammerspoon-lm/inbox.md",
     handoff_dir = home .. "/Documents/hammerspoon-lm/handoff",
     script_drafts_dir = home .. "/Documents/hammerspoon-lm/scripts",
+    diagnostics_dir = home .. "/Documents/hammerspoon-lm/diagnostics",
     include_raw_context = false,
   },
   features = {
@@ -102,6 +132,7 @@ local function normalizeConfig()
   M.storage.inbox_file = expandPath(M.storage.inbox_file)
   M.storage.handoff_dir = expandPath(M.storage.handoff_dir)
   M.storage.script_drafts_dir = expandPath(M.storage.script_drafts_dir)
+  M.storage.diagnostics_dir = expandPath(M.storage.diagnostics_dir)
 end
 
 local function isNonEmptyString(value)
@@ -131,6 +162,7 @@ function M.validate()
     { value = M.storage.inbox_file, label = "storage.inbox_file" },
     { value = M.storage.handoff_dir, label = "storage.handoff_dir" },
     { value = M.storage.script_drafts_dir, label = "storage.script_drafts_dir" },
+    { value = M.storage.diagnostics_dir, label = "storage.diagnostics_dir" },
     { value = M.scripts.default_language, label = "scripts.default_language" },
   }
 
@@ -166,6 +198,80 @@ function M.validate()
 
   if type(M.backend.unload_other_models_before_load) ~= "boolean" then
     return false, "backend.unload_other_models_before_load must be a boolean"
+  end
+
+  if type(M.backend.manage_clipboard_model) ~= "boolean" then
+    return false, "backend.manage_clipboard_model must be a boolean"
+  end
+
+  if type(M.backend.clipboard_ttl_s) ~= "number" or M.backend.clipboard_ttl_s < 0 then
+    return false, "backend.clipboard_ttl_s must be a non-negative number"
+  end
+
+  if type(M.clipboard) ~= "table" then
+    return false, "clipboard must be a table"
+  end
+
+  if type(M.clipboard.profiles) ~= "table" then
+    return false, "clipboard.profiles must be a table"
+  end
+
+  if not isNonEmptyString(M.clipboard.active_profile) then
+    return false, "clipboard.active_profile must be a non-empty string"
+  end
+
+  if type(M.clipboard.profiles[M.clipboard.active_profile]) ~= "table" then
+    return false, "clipboard.active_profile must exist in clipboard.profiles"
+  end
+
+  for name, profile in pairs(M.clipboard.profiles) do
+    if type(profile) ~= "table" then
+      return false, string.format("clipboard.profiles.%s must be a table", name)
+    end
+
+    if not isNonEmptyString(profile.label) then
+      return false, string.format("clipboard.profiles.%s.label is required", name)
+    end
+
+    if not isNonEmptyString(profile.model) then
+      return false, string.format("clipboard.profiles.%s.model is required", name)
+    end
+
+    if profile.api ~= "chat_completions" and profile.api ~= "responses" and profile.api ~= "native_chat" then
+      return false, string.format("clipboard.profiles.%s.api must be chat_completions, native_chat, or responses", name)
+    end
+
+    if profile.reasoning ~= nil and not isNonEmptyString(profile.reasoning) then
+      return false, string.format("clipboard.profiles.%s.reasoning must be a string when provided", name)
+    end
+  end
+
+  if type(M.clipboard.bakeoff_mode) ~= "boolean" then
+    return false, "clipboard.bakeoff_mode must be a boolean"
+  end
+
+  if type(M.debug) ~= "table" then
+    return false, "debug must be a table"
+  end
+
+  if type(M.debug.developer_mode) ~= "boolean" then
+    return false, "debug.developer_mode must be a boolean"
+  end
+
+  if type(M.debug.alert_seconds) ~= "number" or M.debug.alert_seconds <= 0 then
+    return false, "debug.alert_seconds must be a positive number"
+  end
+
+  if type(M.debug.developer_alert_seconds) ~= "number" or M.debug.developer_alert_seconds <= 0 then
+    return false, "debug.developer_alert_seconds must be a positive number"
+  end
+
+  if type(M.debug.copy_alerts_to_clipboard) ~= "boolean" then
+    return false, "debug.copy_alerts_to_clipboard must be a boolean"
+  end
+
+  if type(M.debug.clipboard_sequence_delay_s) ~= "number" or M.debug.clipboard_sequence_delay_s < 0 then
+    return false, "debug.clipboard_sequence_delay_s must be a non-negative number"
   end
 
   if type(M.limits.instant_clipboard_chars) ~= "number" or M.limits.instant_clipboard_chars <= 0 then
