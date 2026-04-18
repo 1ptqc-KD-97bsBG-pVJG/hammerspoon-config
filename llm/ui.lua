@@ -25,6 +25,28 @@ local function buildTooltip(snapshot)
     string.format("Last check: %s", snapshot.last_checked_at or "never"),
   }
 
+  local enabledContext = {}
+  local contextOverrides = snapshot.context_overrides or {}
+  if contextOverrides.include_clipboard then
+    table.insert(enabledContext, "clipboard")
+  end
+  if contextOverrides.include_browser then
+    table.insert(enabledContext, "browser")
+  end
+  if contextOverrides.include_finder then
+    table.insert(enabledContext, "finder")
+  end
+  if contextOverrides.include_profile_metadata then
+    table.insert(enabledContext, "profile_metadata")
+  end
+  if contextOverrides.use_full_clipboard then
+    table.insert(enabledContext, "full_clipboard")
+  end
+
+  if #enabledContext > 0 then
+    table.insert(lines, "Developer context extras: " .. table.concat(enabledContext, ", "))
+  end
+
   if type(snapshot.loaded_instances) == "table" and #snapshot.loaded_instances > 0 then
     local loaded = {}
     for _, item in ipairs(snapshot.loaded_instances) do
@@ -63,7 +85,28 @@ function M.new(config, actions, status)
     local items = {
       { title = "Prepare Clipboard Model", fn = actions.prepareClipboardModel },
       { title = "Developer Mode", checked = snapshot.developer_mode == true, fn = actions.toggleDeveloperMode },
-      { title = "-" },
+    }
+
+    if snapshot.developer_mode == true then
+      table.insert(items, { title = "Include Clipboard", checked = snapshot.context_overrides and snapshot.context_overrides.include_clipboard == true, fn = function()
+        actions.toggleContextOverride("include_clipboard")
+      end })
+      table.insert(items, { title = "Include Browser Context", checked = snapshot.context_overrides and snapshot.context_overrides.include_browser == true, fn = function()
+        actions.toggleContextOverride("include_browser")
+      end })
+      table.insert(items, { title = "Include Finder Context", checked = snapshot.context_overrides and snapshot.context_overrides.include_finder == true, fn = function()
+        actions.toggleContextOverride("include_finder")
+      end })
+      table.insert(items, { title = "Include Profile Metadata", checked = snapshot.context_overrides and snapshot.context_overrides.include_profile_metadata == true, fn = function()
+        actions.toggleContextOverride("include_profile_metadata")
+      end })
+      table.insert(items, { title = "Use Full Clipboard", checked = snapshot.context_overrides and snapshot.context_overrides.use_full_clipboard == true, fn = function()
+        actions.toggleContextOverride("use_full_clipboard")
+      end })
+    end
+
+    table.insert(items, { title = "-" })
+    local actionItems = {
       { title = "Summarize Clipboard", fn = actions.summarizeClipboard },
       { title = "Explain Clipboard Error", fn = actions.explainClipboardError },
       { title = "Rewrite Clipboard Tersely", fn = actions.rewriteClipboardTersely },
@@ -93,6 +136,10 @@ function M.new(config, actions, status)
       end },
       { title = "Reload Config", fn = hs.reload },
     }
+
+    for _, item in ipairs(actionItems) do
+      table.insert(items, item)
+    end
 
     return items
   end

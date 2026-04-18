@@ -207,6 +207,13 @@ M._test = {
 }
 
 function M.new(config, client)
+  local contextOverrideKeys = {
+    include_clipboard = true,
+    include_browser = true,
+    include_finder = true,
+    include_profile_metadata = true,
+    use_full_clipboard = true,
+  }
   local changeListener = nil
   local busyCount = 0
   local state = {
@@ -225,6 +232,13 @@ function M.new(config, client)
     last_status_source = nil,
     active_clipboard_profile = config.clipboard.active_profile,
     developer_mode = config.debug and config.debug.developer_mode == true or false,
+    context_overrides = {
+      include_clipboard = false,
+      include_browser = false,
+      include_finder = false,
+      include_profile_metadata = false,
+      use_full_clipboard = false,
+    },
   }
 
   local function notify()
@@ -274,6 +288,35 @@ function M.new(config, client)
 
   function self.toggleDeveloperMode()
     return self.setDeveloperMode(not self.getDeveloperMode())
+  end
+
+  function self.getContextOverrides()
+    local copy = {}
+    for key, value in pairs(state.context_overrides or {}) do
+      copy[key] = value == true
+    end
+    return copy
+  end
+
+  function self.setContextOverride(key, enabled)
+    if not contextOverrideKeys[key] then
+      return false
+    end
+
+    local nextOverrides = self.getContextOverrides()
+    nextOverrides[key] = enabled == true
+    applySnapshot({ context_overrides = nextOverrides })
+    return true
+  end
+
+  function self.toggleContextOverride(key)
+    if not contextOverrideKeys[key] then
+      return nil
+    end
+
+    local nextValue = not (state.context_overrides and state.context_overrides[key] == true)
+    self.setContextOverride(key, nextValue)
+    return nextValue
   end
 
   function self.beginBusy()

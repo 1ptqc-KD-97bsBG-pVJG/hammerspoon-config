@@ -86,6 +86,7 @@ function M.new(deps)
   local config = deps.config
   local client = deps.client
   local models = deps.models
+  local policies = deps.policies
   local prompts = deps.prompts
   local context = deps.context
   local status = deps.status
@@ -273,11 +274,28 @@ function M.new(deps)
   end
 
   local function buildInstantContext()
-    return context.buildContext({
-      include_browser = true,
-      include_finder = true,
-      allow_full_clipboard = false,
-    })
+    local overrides = developerModeEnabled() and status.getContextOverrides() or {}
+    return overrides
+  end
+
+  local function buildActionContext(actionName, profile)
+    local contextOptions = policies.resolveContextOptions(actionName, buildInstantContext())
+    if not contextOptions then
+      return nil, nil
+    end
+
+    local payloadContext = context.buildContext(contextOptions)
+    if contextOptions.include_profile_metadata then
+      payloadContext.profile_metadata = {
+        name = profile.name,
+        label = profile.label,
+        model = profile.model,
+        api = profile.api,
+      }
+    end
+
+    payloadContext.context_flags = policies.describeEnabledContext(contextOptions)
+    return payloadContext, contextOptions
   end
 
   local function getActiveClipboardProfile()
@@ -429,15 +447,20 @@ function M.new(deps)
   end
 
   local function runClipboardAction(spec)
-    local payloadContext = buildInstantContext()
-    if isBlank(payloadContext.clipboard) then
-      showClipboardRequired(spec.label)
-      return
-    end
-
     local profile = getActiveClipboardProfile()
     if not profile then
       showAlert("Active clipboard profile is invalid.", 2.5)
+      return
+    end
+
+    local payloadContext, contextOptions = buildActionContext(spec.action_name, profile)
+    if not payloadContext then
+      showAlert("Action context policy is invalid.", 2.5)
+      return
+    end
+
+    if isBlank(payloadContext.clipboard) then
+      showClipboardRequired(spec.label)
       return
     end
 
@@ -456,6 +479,8 @@ function M.new(deps)
         latency_ms = elapsedMs,
         failure_reason = result.failure_reason,
         preview = result.preview,
+        context_flags = payloadContext.context_flags,
+        allow_full_clipboard = contextOptions and contextOptions.allow_full_clipboard or false,
       })
     end
 
@@ -695,6 +720,25 @@ function M.new(deps)
     local message = enabled
       and "Developer Mode enabled.\nAlerts stay on screen longer and are copied to the clipboard."
       or "Developer Mode disabled."
+    showAlert(message, 2.5)
+  end
+
+  function self.toggleContextOverride(key)
+    local enabled = status.toggleContextOverride(key)
+    if enabled == nil then
+      showAlert("Unknown context toggle: " .. tostring(key), 2.5)
+      return
+    end
+
+    local labelMap = {
+      include_clipboard = "Clipboard context",
+      include_browser = "Browser context",
+      include_finder = "Finder context",
+      include_profile_metadata = "Profile metadata",
+      use_full_clipboard = "Full clipboard",
+    }
+
+    local message = string.format("%s %s.", labelMap[key] or key, enabled and "enabled" or "disabled")
     showAlert(message, 2.5)
   end
 

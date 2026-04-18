@@ -5,11 +5,19 @@ local function nonEmpty(value)
 end
 
 local function renderContext(context)
-  local lines = {
-    string.format("App: %s", context.app ~= "" and context.app or "Unknown"),
-    string.format("Window: %s", context.window_title ~= "" and context.window_title or "Unknown"),
-    string.format("Captured At: %s", context.captured_at or "Unknown"),
-  }
+  local lines = {}
+
+  if nonEmpty(context.app) then
+    table.insert(lines, string.format("App: %s", context.app))
+  end
+
+  if nonEmpty(context.window_title) then
+    table.insert(lines, string.format("Window: %s", context.window_title))
+  end
+
+  if nonEmpty(context.captured_at) then
+    table.insert(lines, string.format("Captured At: %s", context.captured_at))
+  end
 
   if nonEmpty(context.url) then
     table.insert(lines, string.format("URL: %s", context.url))
@@ -26,11 +34,23 @@ local function renderContext(context)
     end
   end
 
+  if type(context.profile_metadata) == "table" then
+    if nonEmpty(context.profile_metadata.label) then
+      table.insert(lines, string.format("Clipboard Profile: %s", context.profile_metadata.label))
+    end
+    if nonEmpty(context.profile_metadata.model) then
+      table.insert(lines, string.format("Model: %s", context.profile_metadata.model))
+    end
+    if nonEmpty(context.profile_metadata.api) then
+      table.insert(lines, string.format("API: %s", context.profile_metadata.api))
+    end
+  end
+
   if context.truncated then
     table.insert(lines, "Clipboard: Truncated to instant-action limit")
   end
 
-  return table.concat(lines, "\n")
+  return #lines > 0 and table.concat(lines, "\n") or "Captured At: " .. (context.captured_at or "Unknown")
 end
 
 local function renderClipboardBlock(context)

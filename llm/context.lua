@@ -217,17 +217,25 @@ function M.new(config)
   function self.buildContext(opts)
     opts = opts or {}
 
-    local appName = self.getFrontmostAppName()
-    local clipboard, truncated = truncateClipboard(
-      self.getClipboardText(),
-      config.limits.instant_clipboard_chars,
-      opts.allow_full_clipboard
-    )
+    local observedAppName = self.getFrontmostAppName()
+    local includeClipboard = opts.include_clipboard ~= false
+    local includeApp = opts.include_app ~= false
+    local includeWindow = opts.include_window ~= false
+    local clipboard = ""
+    local truncated = false
+
+    if includeClipboard then
+      clipboard, truncated = truncateClipboard(
+        self.getClipboardText(),
+        config.limits.instant_clipboard_chars,
+        opts.allow_full_clipboard
+      )
+    end
 
     local context = {
-      source = opts.source or "clipboard",
-      app = appName,
-      window_title = self.getFrontWindowTitle(),
+      source = opts.source or (includeClipboard and "clipboard" or "context"),
+      app = includeApp and observedAppName or "",
+      window_title = includeWindow and self.getFrontWindowTitle() or "",
       url = nil,
       page_title = nil,
       finder_selection = {},
@@ -236,8 +244,8 @@ function M.new(config)
       captured_at = isoNow(),
     }
 
-    if opts.include_browser and self.isSupportedBrowser(appName) then
-      local browserContext = self.getBrowserContext(appName)
+    if opts.include_browser and self.isSupportedBrowser(observedAppName) then
+      local browserContext = self.getBrowserContext(observedAppName)
       if browserContext then
         context.url = browserContext.url
         context.page_title = browserContext.page_title
@@ -245,7 +253,7 @@ function M.new(config)
     end
 
     if opts.include_finder then
-      local shouldQueryFinder = opts.force_finder or appName == "Finder"
+      local shouldQueryFinder = opts.force_finder or observedAppName == "Finder"
       if shouldQueryFinder then
         context.finder_selection = self.getFinderSelection()
       end
