@@ -239,6 +239,10 @@ function M.new(deps)
     showAlert(string.format("%s needs clipboard text first.", actionLabel), 2)
   end
 
+  local function showTaskDescriptionRequired(actionLabel)
+    showAlert(string.format("%s needs a task description first.", actionLabel), 2)
+  end
+
   local function showNotReady(actionLabel)
     showAlert(string.format("%s is wired but not implemented yet.", actionLabel), 2)
   end
@@ -296,6 +300,118 @@ function M.new(deps)
 
     payloadContext.context_flags = policies.describeEnabledContext(contextOptions)
     return payloadContext, contextOptions
+  end
+
+  local function promptForTaskDescription(title)
+    local button, text = hs.dialog.textPrompt(
+      title,
+      "Describe the script or helper you want to generate.",
+      "",
+      "Generate",
+      "Cancel"
+    )
+
+    if button ~= "Generate" then
+      return nil
+    end
+
+    local taskDescription = trim(text)
+    if taskDescription == "" then
+      return ""
+    end
+
+    return taskDescription
+  end
+
+  local function metadataFromContext(actionName, payloadContext, profile)
+    local metadata = {
+      { label = "Action", value = actionName },
+      { label = "Captured At", value = payloadContext.captured_at },
+      { label = "App", value = payloadContext.app },
+      { label = "Window", value = payloadContext.window_title },
+      { label = "URL", value = payloadContext.url },
+      { label = "Page Title", value = payloadContext.page_title },
+      { label = "Profile", value = profile and profile.label or nil },
+      { label = "Model", value = profile and profile.model or nil },
+      { label = "API", value = profile and profile.api or nil },
+    }
+
+    return metadata
+  end
+
+  local function renderContextSummaryMarkdown(payloadContext)
+    local lines = {
+      "## Captured Context",
+      "",
+    }
+
+    if payloadContext.app and payloadContext.app ~= "" then
+      table.insert(lines, "- App: " .. payloadContext.app)
+    end
+    if payloadContext.window_title and payloadContext.window_title ~= "" then
+      table.insert(lines, "- Window: " .. payloadContext.window_title)
+    end
+    if payloadContext.url and payloadContext.url ~= "" then
+      table.insert(lines, "- URL: " .. payloadContext.url)
+    end
+    if payloadContext.page_title and payloadContext.page_title ~= "" then
+      table.insert(lines, "- Page Title: " .. payloadContext.page_title)
+    end
+    if payloadContext.profile_metadata and payloadContext.profile_metadata.label then
+      table.insert(lines, "- Clipboard Profile: " .. payloadContext.profile_metadata.label)
+    end
+    if payloadContext.profile_metadata and payloadContext.profile_metadata.model then
+      table.insert(lines, "- Model: " .. payloadContext.profile_metadata.model)
+    end
+    if payloadContext.profile_metadata and payloadContext.profile_metadata.api then
+      table.insert(lines, "- API: " .. payloadContext.profile_metadata.api)
+    end
+
+    if type(payloadContext.finder_selection) == "table" and #payloadContext.finder_selection > 0 then
+      table.insert(lines, "")
+      table.insert(lines, "## Finder Selection")
+      table.insert(lines, "")
+      for _, item in ipairs(payloadContext.finder_selection) do
+        table.insert(lines, "- " .. item)
+      end
+    end
+
+    if payloadContext.clipboard and payloadContext.clipboard ~= "" then
+      table.insert(lines, "")
+      table.insert(lines, "## Clipboard")
+      table.insert(lines, "")
+      table.insert(lines, "```")
+      table.insert(lines, payloadContext.clipboard)
+      table.insert(lines, "```")
+    end
+
+    return table.concat(lines, "\n")
+  end
+
+  local function openUrlInPrimaryBrowser(url)
+    if not url or url == "" then
+      return false
+    end
+
+    if config.ui.primary_browser_bundle_id and config.ui.primary_browser_bundle_id ~= "" then
+      hs.urlevent.openURLWithBundle(url, config.ui.primary_browser_bundle_id)
+      return true
+    end
+
+    if config.ui.primary_browser_app and config.ui.primary_browser_app ~= "" then
+      local task = hs.task.new("/usr/bin/open", nil, {
+        "-a",
+        config.ui.primary_browser_app,
+        url,
+      })
+      if task then
+        task:start()
+        return true
+      end
+    end
+
+    hs.urlevent.openURL(url)
+    return true
   end
 
   local function getActiveClipboardProfile()
@@ -410,6 +526,56 @@ function M.new(deps)
     return false, nil
   end
 
+  local function validateOutput(validatorName, inputText, text)
+    local output = sanitizeModelText(text)
+
+    if validatorName == "summary" then
+      local normalized = normalizeSummaryText(output)
+      if not normalized then
+        return nil, "invalid_summary"
+      end
+      return normalized, nil
+    end
+
+    if validatorName == "rewrite" then
+      local bad, reason = isBadRewrite(inputText or "", output)
+      if bad then
+        return nil, reason
+      end
+      return output, nil
+    end
+
+    if validatorName == "error_explain" then
+      local bad, reason = isBadErrorExplain(output)
+      if bad then
+        return nil, reason
+      end
+      return normalizeErrorExplainText(output), nil
+    end
+
+    return output, nil
+  end
+
+  local function normalizeSuccessResult(result, fallbackText)
+    if type(result) == "table" then
+      if result.ok == false then
+        return result
+      end
+
+      return {
+        ok = true,
+        message = result.message or "",
+        clipboard_text = result.clipboard_text or fallbackText,
+      }
+    end
+
+    return {
+      ok = true,
+      message = tostring(result or ""),
+      clipboard_text = fallbackText,
+    }
+  end
+
   local function requestPlainText(profile, prompt, maxTokens, callback)
     if profile.api == "responses" then
       client.requestTextResponse({
@@ -447,6 +613,12 @@ function M.new(deps)
   end
 
   local function runClipboardAction(spec)
+    local policy = policies.getActionPolicy(spec.action_name)
+    if not policy then
+      showAlert("Action policy is invalid.", 2.5)
+      return
+    end
+
     local profile = getActiveClipboardProfile()
     if not profile then
       showAlert("Active clipboard profile is invalid.", 2.5)
@@ -459,13 +631,25 @@ function M.new(deps)
       return
     end
 
-    if isBlank(payloadContext.clipboard) then
+    local requiresClipboard = spec.requires_clipboard
+    if requiresClipboard == nil then
+      requiresClipboard = policy.requires_clipboard ~= false
+    end
+
+    if requiresClipboard and isBlank(payloadContext.clipboard) then
       showClipboardRequired(spec.label)
       return
     end
 
     local startedAt = hs.timer.absoluteTime()
-    local prompt = spec.build_prompt(payloadContext)
+    local buildPrompt = spec.build_prompt
+      or (type(policy.prompt_builder) == "string" and prompts[policy.prompt_builder])
+    if type(buildPrompt) ~= "function" then
+      showAlert("Action prompt builder is invalid.", 2.5)
+      return
+    end
+
+    local prompt = buildPrompt(payloadContext)
 
     local function finishDiagnostics(result)
       local elapsedMs = math.floor((hs.timer.absoluteTime() - startedAt) / 1000000)
@@ -484,30 +668,7 @@ function M.new(deps)
       })
     end
 
-    local function validate(text)
-      local output = sanitizeModelText(text)
-      if spec.action_name == "summarizeClipboard" then
-        local normalized = normalizeSummaryText(output)
-        if not normalized then
-          return nil, "invalid_summary"
-        end
-        return normalized, nil
-      end
-
-      if spec.action_name == "rewriteClipboardTersely" then
-        local bad, reason = isBadRewrite(payloadContext.clipboard, output)
-        if bad then
-          return nil, reason
-        end
-        return output, nil
-      end
-
-      local bad, reason = isBadErrorExplain(output)
-      if bad then
-        return nil, reason
-      end
-      return normalizeErrorExplainText(output), nil
-    end
+    local validatorName = spec.validator or policy.validator
 
     local retried = false
 
@@ -523,10 +684,13 @@ function M.new(deps)
         return
       end
 
-      local normalized, invalidReason = validate(result.data.text)
-      if not normalized and not retried and spec.build_retry_prompt then
+      local normalized, invalidReason = validateOutput(validatorName, payloadContext.clipboard, result.data.text)
+      local buildRetryPrompt = spec.build_retry_prompt
+        or (type(policy.retry_prompt_builder) == "string" and prompts[policy.retry_prompt_builder])
+
+      if not normalized and not retried and type(buildRetryPrompt) == "function" then
         retried = true
-        local retryPrompt = spec.build_retry_prompt(payloadContext)
+        local retryPrompt = buildRetryPrompt(payloadContext)
         requestPlainText(profile, retryPrompt, spec.retry_max_tokens or spec.max_tokens, handleResult)
         return
       end
@@ -552,15 +716,29 @@ function M.new(deps)
         return
       end
 
+      local successResult = normalizeSuccessResult(
+        spec.handle_success(normalized, payloadContext, profile),
+        normalized
+      )
+      if not successResult.ok then
+        finishDiagnostics({
+          success = false,
+          failure_reason = successResult.failure_reason or "postprocess_failed",
+          preview = previewText(successResult.message or "", 120),
+        })
+        showAlert(successResult.message or (spec.label .. " failed."), 3)
+        return
+      end
+
+      local clipboardText = successResult.clipboard_text or normalized
       finishDiagnostics({
         success = true,
-        preview = previewText(normalized, 120),
+        preview = previewText(clipboardText, 120),
       })
-      local successMessage = spec.handle_success(normalized, payloadContext, profile)
       if not developerModeEnabled() or (config.debug and config.debug.copy_alerts_to_clipboard == false) then
-        copyResult(normalized)
+        copyResult(clipboardText)
       end
-      showAlert(successMessage, spec.success_seconds, normalized)
+      showAlert(successResult.message, spec.success_seconds, clipboardText)
     end
 
     status.beginBusy()
@@ -598,7 +776,11 @@ function M.new(deps)
         if preview ~= "" then
           message = message .. "\n" .. preview
         end
-        return message
+        return {
+          ok = true,
+          message = message,
+          clipboard_text = text,
+        }
       end,
     })
   end
@@ -622,7 +804,11 @@ function M.new(deps)
         if preview ~= "" then
           message = message .. "\n" .. preview
         end
-        return message
+        return {
+          ok = true,
+          message = message,
+          clipboard_text = text,
+        }
       end,
     })
   end
@@ -646,7 +832,11 @@ function M.new(deps)
         if preview ~= "" then
           message = message .. "\n" .. preview
         end
-        return message
+        return {
+          ok = true,
+          message = message,
+          clipboard_text = text,
+        }
       end,
     })
   end
@@ -663,7 +853,7 @@ function M.new(deps)
       status.endBusy()
 
       if not result.ok then
-      showAlert(formatFailure("Prepare Clipboard Model", result, profile), 3.5)
+        showAlert(formatFailure("Prepare Clipboard Model", result, profile), 3.5)
         return
       end
 
@@ -743,15 +933,225 @@ function M.new(deps)
   end
 
   function self.draftUtilityScript()
-    showNotReady("Draft Utility Script")
+    local profile = getActiveClipboardProfile()
+    if not profile then
+      showAlert("Active clipboard profile is invalid.", 2.5)
+      return
+    end
+
+    local taskDescription = promptForTaskDescription("Draft Utility Script")
+    if taskDescription == nil then
+      showAlert("Draft Utility Script cancelled.", 2)
+      return
+    end
+
+    if taskDescription == "" then
+      showTaskDescriptionRequired("Draft Utility Script")
+      return
+    end
+
+    local payloadContext, contextOptions = buildActionContext("draftUtilityScript", profile)
+    if not payloadContext then
+      showAlert("Action context policy is invalid.", 2.5)
+      return
+    end
+
+    local prompt = prompts.buildScriptDraftPrompt(
+      taskDescription,
+      payloadContext,
+      scripts.guessLanguage(taskDescription)
+    )
+
+    status.beginBusy()
+    ensureClipboardProfileReady(profile, function(ensureResult)
+      if not ensureResult.ok then
+        status.endBusy()
+        showAlert(formatFailure("Draft Utility Script", ensureResult, profile), 3)
+        return
+      end
+
+      requestPlainText(profile, prompt, 1400, function(result)
+        status.endBusy()
+
+        if not result.ok then
+          showAlert(formatFailure("Draft Utility Script", result, profile), 3.5)
+          return
+        end
+
+        local guessedLanguage = scripts.guessLanguage(taskDescription)
+        local extracted = scripts.extractCodeBlock(result.data.text, guessedLanguage)
+        if not extracted or not extracted.code or extracted.code == "" then
+          local rawSave = storage.saveMarkdown(
+            "Utility Script Raw Draft",
+            result.data.text,
+            metadataFromContext("draftUtilityScript", payloadContext, profile),
+            {
+              directory = config.storage.script_drafts_dir,
+              prefix = "script-raw",
+            }
+          )
+
+          if rawSave.ok then
+            copyResult(rawSave.data.path)
+            showAlert("Draft Utility Script could not extract a code block. Raw response saved and path copied to the clipboard.", 4, rawSave.data.path)
+          else
+            showAlert("Draft Utility Script could not extract a code block or save the raw response.", 4)
+          end
+          return
+        end
+
+        local language = extracted.language or guessedLanguage
+        local note = scripts.renderRequestNote({
+          generated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+          language = language,
+          task_description = taskDescription,
+          context = payloadContext,
+          note = extracted.explanation,
+          include_raw_context = config.storage.include_raw_context == true,
+        })
+
+        local saved = storage.saveScriptDraft(
+          taskDescription,
+          extracted.code,
+          note,
+          scripts.extensionForLanguage(language)
+        )
+
+        if not saved.ok then
+          showAlert(formatFailure("Draft Utility Script", saved, profile), 3.5)
+          return
+        end
+
+        copyResult(saved.data.code_path)
+        if config.scripts.open_after_generate then
+          hs.open(saved.data.code_path)
+        end
+
+        local message = table.concat({
+          string.format("Draft Utility Script saved using %s.", profile.label),
+          "Script: " .. saved.data.code_path,
+          "Note: " .. saved.data.note_path,
+        }, "\n")
+        showAlert(message, 4, saved.data.code_path)
+
+        recordBakeoff({
+          recorded_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+          action = "draftUtilityScript",
+          profile = profile.name,
+          model = profile.model,
+          api = profile.api,
+          success = true,
+          preview = previewText(taskDescription, 120),
+          context_flags = payloadContext.context_flags,
+          allow_full_clipboard = contextOptions and contextOptions.allow_full_clipboard or false,
+        })
+      end)
+    end)
   end
 
   function self.sendToOpenWebUI()
-    showNotReady("Send To Open WebUI")
+    local profile = getActiveClipboardProfile()
+    if not profile then
+      showAlert("Active clipboard profile is invalid.", 2.5)
+      return
+    end
+
+    local payloadContext = buildActionContext("sendToOpenWebUI", profile)
+    if not payloadContext then
+      showAlert("Action context policy is invalid.", 2.5)
+      return
+    end
+
+    local seedPrompt = prompts.buildOpenWebUISeedPrompt(payloadContext)
+    local handoffBody = table.concat({
+      "Use this file as the full local handoff context.",
+      "",
+      renderContextSummaryMarkdown(payloadContext),
+      "",
+      "## Seed Prompt",
+      "",
+      seedPrompt,
+    }, "\n")
+
+    local saved = storage.saveMarkdown(
+      "Open WebUI Handoff",
+      handoffBody,
+      metadataFromContext("sendToOpenWebUI", payloadContext, profile),
+      {
+        directory = config.storage.handoff_dir,
+        prefix = "handoff",
+      }
+    )
+
+    if not saved.ok then
+      showAlert(formatFailure("Send To Open WebUI", saved, profile), 3.5)
+      return
+    end
+
+    copyResult(seedPrompt)
+    openUrlInPrimaryBrowser(config.ui.open_webui_url)
+
+    local message = table.concat({
+      "Open WebUI handoff saved.",
+      "Seed prompt copied to the clipboard.",
+      "Handoff: " .. saved.data.path,
+    }, "\n")
+    showAlert(message, 4, seedPrompt)
   end
 
   function self.saveClipboardSummary()
-    showNotReady("Save Clipboard Summary")
+    runClipboardAction({
+      action_name = "saveClipboardSummary",
+      label = "Save Clipboard Summary",
+      max_tokens = 240,
+      retry_max_tokens = 320,
+      success_seconds = 3.5,
+      handle_success = function(text, payloadContext, profile)
+        local body = table.concat({
+          text,
+          "",
+          renderContextSummaryMarkdown(payloadContext),
+        }, "\n")
+
+        local saved = storage.saveMarkdown(
+          "Clipboard Summary",
+          body,
+          metadataFromContext("saveClipboardSummary", payloadContext, profile),
+          {
+            directory = config.storage.output_dir,
+            prefix = "summary",
+          }
+        )
+
+        if not saved.ok then
+          return {
+            ok = false,
+            message = formatFailure("Save Clipboard Summary", saved, profile),
+            failure_reason = saved.error and saved.error.code or "summary_save_failed",
+          }
+        end
+
+        if config.storage.append_saved_summaries_to_inbox then
+          local appended = storage.appendInbox(string.format("- [%s](%s)", os.date("%Y-%m-%d %H:%M"), saved.data.path))
+          if not appended.ok then
+            return {
+              ok = false,
+              message = formatFailure("Save Clipboard Summary", appended, profile),
+              failure_reason = appended.error and appended.error.code or "summary_inbox_append_failed",
+            }
+          end
+        end
+
+        return {
+          ok = true,
+          message = table.concat({
+            string.format("Summary saved using %s.", profile.label),
+            "Path: " .. saved.data.path,
+          }, "\n"),
+          clipboard_text = text,
+        }
+      end,
+    })
   end
 
   function self.refreshBackendStatus(options)

@@ -99,7 +99,20 @@ function M.new(config)
       end
     end
 
-    return fallbackMatch
+    if fallbackMatch then
+      return fallbackMatch
+    end
+
+    local rawBody = trim(body)
+    if rawBody ~= "" and not rawBody:find("```", 1, true) then
+      return {
+        code = rawBody,
+        language = preferred,
+        explanation = "",
+      }
+    end
+
+    return nil
   end
 
   function self.renderRequestNote(args)

@@ -67,6 +67,7 @@ local M = {
   storage = {
     output_dir = home .. "/Documents/hammerspoon-lm/output",
     inbox_file = home .. "/Documents/hammerspoon-lm/inbox.md",
+    append_saved_summaries_to_inbox = false,
     handoff_dir = home .. "/Documents/hammerspoon-lm/handoff",
     script_drafts_dir = home .. "/Documents/hammerspoon-lm/scripts",
     diagnostics_dir = home .. "/Documents/hammerspoon-lm/diagnostics",
@@ -272,6 +273,10 @@ function M.validate()
 
   if type(M.debug.clipboard_sequence_delay_s) ~= "number" or M.debug.clipboard_sequence_delay_s < 0 then
     return false, "debug.clipboard_sequence_delay_s must be a non-negative number"
+  end
+
+  if type(M.storage.append_saved_summaries_to_inbox) ~= "boolean" then
+    return false, "storage.append_saved_summaries_to_inbox must be a boolean"
   end
 
   if type(M.limits.instant_clipboard_chars) ~= "number" or M.limits.instant_clipboard_chars <= 0 then

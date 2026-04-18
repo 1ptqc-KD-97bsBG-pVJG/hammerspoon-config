@@ -50,4 +50,20 @@ assertTrue(#enabled >= 5, "enabled context description should include the active
 assertTrue(policyModule.isKnownContextOverride("include_browser"), "browser override should be a known toggle")
 assertTrue(not policyModule.resolveContextOptions("unknownAction", {}), "unknown actions should not resolve context options")
 
+local scriptDraftOptions = policyModule.resolveContextOptions("draftUtilityScript", {
+  include_browser = true,
+  include_profile_metadata = true,
+  use_full_clipboard = true,
+})
+assertTrue(scriptDraftOptions.include_finder == true, "script drafting should include Finder context by default")
+assertTrue(scriptDraftOptions.force_finder == true, "script drafting should force Finder selection lookup")
+assertTrue(scriptDraftOptions.allow_full_clipboard == true, "script drafting should allow full clipboard capture")
+assertTrue(scriptDraftOptions.include_browser == true, "script drafting should allow browser context in developer mode")
+
+local webuiOptions = policyModule.resolveContextOptions("sendToOpenWebUI", {})
+assertTrue(webuiOptions.include_browser == true, "WebUI handoff should include browser context by default")
+assertTrue(webuiOptions.include_finder == true, "WebUI handoff should include Finder context by default")
+assertTrue(webuiOptions.include_profile_metadata == true, "WebUI handoff should include profile metadata by default")
+assertTrue(webuiOptions.allow_full_clipboard == true, "WebUI handoff should allow full clipboard by default")
+
 print("action policy tests passed")
