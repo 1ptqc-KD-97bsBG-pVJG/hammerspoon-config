@@ -239,6 +239,10 @@ function M.new(deps)
     showAlert(string.format("%s needs clipboard text first.", actionLabel), 2)
   end
 
+  local function showFinderRequired(actionLabel)
+    showAlert(string.format("%s needs a Finder selection first.", actionLabel), 2)
+  end
+
   local function showTaskDescriptionRequired(actionLabel)
     showAlert(string.format("%s needs a task description first.", actionLabel), 2)
   end
@@ -610,6 +614,163 @@ function M.new(deps)
     }, "\n")
   end
 
+  local function normalizeRenamePlan(text)
+    local output = sanitizeModelText(text)
+    if output == "" or startsLikeJson(output) or looksLikeReasoningLeak(output) then
+      return nil
+    end
+
+    local previewLines = {}
+    local inPreview = false
+    for _, line in ipairs(collectMeaningfulLines(output)) do
+      if line == "Preview:" then
+        inPreview = true
+      elseif line == "Script:" then
+        break
+      elseif inPreview then
+        table.insert(previewLines, line)
+      end
+    end
+
+    if #previewLines == 0 then
+      return nil
+    end
+
+    local normalizedPreview = {}
+    for _, line in ipairs(previewLines) do
+      if not line:find(" -> ", 1, true) then
+        return nil
+      end
+      table.insert(normalizedPreview, line)
+    end
+
+    local lines = {
+      "Preview:",
+    }
+    for _, line in ipairs(normalizedPreview) do
+      table.insert(lines, line)
+    end
+
+    local codeBlock = output:match("(Script:%s*\n```.-```)")
+    if codeBlock then
+      table.insert(lines, codeBlock)
+    end
+
+    return table.concat(lines, "\n")
+  end
+
+  local function normalizeProcessPlan(text)
+    local output = sanitizeModelText(text)
+    if output == "" or startsLikeJson(output) or looksLikeReasoningLeak(output) then
+      return nil
+    end
+
+    local planLines = {}
+    local inPlan = false
+    for _, line in ipairs(collectMeaningfulLines(output)) do
+      if line == "Plan:" then
+        inPlan = true
+      elseif line == "Script:" then
+        break
+      elseif inPlan then
+        table.insert(planLines, line)
+      end
+    end
+
+    local normalizedPlan = normalizeBulletList(table.concat(planLines, "\n"), 2, 7)
+    if not normalizedPlan then
+      return nil
+    end
+
+    local lines = { "Plan:" }
+    for line in normalizedPlan:gmatch("[^\n]+") do
+      table.insert(lines, line)
+    end
+
+    local codeBlock = output:match("(Script:%s*\n```.-```)")
+    if codeBlock then
+      table.insert(lines, codeBlock)
+    end
+
+    return table.concat(lines, "\n")
+  end
+
+  local function normalizeFolderExplain(text)
+    local output = sanitizeModelText(text)
+    if output == "" or startsLikeJson(output) or looksLikeReasoningLeak(output) then
+      return nil
+    end
+
+    local lowered = output:lower()
+    if not lowered:find("what it looks like", 1, true) or not lowered:find("suggested next actions", 1, true) then
+      return nil
+    end
+
+    return output
+  end
+
+  local function normalizeCommandBlock(text)
+    local output = sanitizeModelText(text)
+    if output == "" or startsLikeJson(output) or looksLikeReasoningLeak(output) then
+      return nil
+    end
+
+    if not output:find("^Command:%s*", 1) then
+      return nil
+    end
+    if not output:find("```", 1, true) then
+      return nil
+    end
+    if not output:find("Explanation:%s*.+") then
+      return nil
+    end
+
+    return output
+  end
+
+  local function maybeSavePlanScript(actionName, actionLabel, taskDescription, payloadContext, profile, responseText, preferredLanguage)
+    if not tostring(responseText or ""):find("```", 1, true) then
+      return nil
+    end
+
+    local extracted = scripts.extractCodeBlock(responseText, preferredLanguage)
+    if not extracted or not extracted.code or extracted.code == "" then
+      return nil
+    end
+
+    local language = extracted.language or preferredLanguage or scripts.guessLanguage(taskDescription or "")
+    local note = scripts.renderRequestNote({
+      generated_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      language = language,
+      task_description = taskDescription,
+      context = payloadContext,
+      note = extracted.explanation ~= "" and (actionLabel .. " helper script extracted from the model response.\n\n" .. extracted.explanation)
+        or (actionLabel .. " helper script extracted from the model response."),
+      include_raw_context = config.storage.include_raw_context == true,
+    })
+
+    local saved = storage.saveScriptDraft(
+      taskDescription,
+      extracted.code,
+      note,
+      scripts.extensionForLanguage(language)
+    )
+
+    if not saved.ok then
+      return {
+        ok = false,
+        message = formatFailure(actionLabel, saved, profile),
+        failure_reason = saved.error and saved.error.code or (actionName .. "_script_save_failed"),
+      }
+    end
+
+    return {
+      ok = true,
+      code_path = saved.data.code_path,
+      note_path = saved.data.note_path,
+    }
+  end
+
   local function isBadRewrite(inputText, outputText)
     local output = sanitizeModelText(outputText)
     if output == "" then
@@ -746,6 +907,38 @@ function M.new(deps)
       return normalized, nil
     end
 
+    if validatorName == "rename_plan" then
+      local normalized = normalizeRenamePlan(output)
+      if not normalized then
+        return nil, "invalid_rename_plan"
+      end
+      return normalized, nil
+    end
+
+    if validatorName == "process_plan" then
+      local normalized = normalizeProcessPlan(output)
+      if not normalized then
+        return nil, "invalid_process_plan"
+      end
+      return normalized, nil
+    end
+
+    if validatorName == "folder_explain" then
+      local normalized = normalizeFolderExplain(output)
+      if not normalized then
+        return nil, "invalid_folder_explain"
+      end
+      return normalized, nil
+    end
+
+    if validatorName == "command_block" then
+      local normalized = normalizeCommandBlock(output)
+      if not normalized then
+        return nil, "invalid_command_block"
+      end
+      return normalized, nil
+    end
+
     return output, nil
   end
 
@@ -829,8 +1022,18 @@ function M.new(deps)
       requiresClipboard = policy.requires_clipboard ~= false
     end
 
+    local requiresFinder = spec.requires_finder
+    if requiresFinder == nil then
+      requiresFinder = policy.requires_finder == true
+    end
+
     if requiresClipboard and isBlank(payloadContext.clipboard) then
       showClipboardRequired(spec.label)
+      return
+    end
+
+    if requiresFinder and (type(payloadContext.finder_selection) ~= "table" or #payloadContext.finder_selection == 0) then
+      showFinderRequired(spec.label)
       return
     end
 
@@ -1463,6 +1666,142 @@ function M.new(deps)
           message = message .. " Input was truncated."
         end
 
+        local preview = previewText(text, 110)
+        if preview ~= "" then
+          message = message .. "\n" .. preview
+        end
+
+        return {
+          ok = true,
+          message = message,
+          clipboard_text = text,
+        }
+      end,
+    })
+  end
+
+  function self.renameFilesPlan()
+    runClipboardAction({
+      action_name = "renameFilesPlan",
+      label = "Rename Files Plan",
+      max_tokens = 850,
+      success_seconds = 3.5,
+      handle_success = function(text, payloadContext, profile)
+        local taskDescription = payloadContext.clipboard ~= ""
+          and ("Rename selected files based on these instructions: " .. payloadContext.clipboard)
+          or "Rename the selected files safely."
+        local savedScript = maybeSavePlanScript(
+          "renameFilesPlan",
+          "Rename Files Plan",
+          taskDescription,
+          payloadContext,
+          profile,
+          text,
+          "bash"
+        )
+
+        if savedScript and not savedScript.ok then
+          return savedScript
+        end
+
+        local lines = {
+          string.format("Rename plan copied to clipboard using %s.", profile.label),
+        }
+        if savedScript and savedScript.ok then
+          table.insert(lines, "Script: " .. savedScript.code_path)
+          table.insert(lines, "Note: " .. savedScript.note_path)
+        end
+
+        local preview = previewText(text, 110)
+        if preview ~= "" then
+          table.insert(lines, preview)
+        end
+
+        return {
+          ok = true,
+          message = table.concat(lines, "\n"),
+          clipboard_text = text,
+        }
+      end,
+    })
+  end
+
+  function self.processFilesPlan()
+    runClipboardAction({
+      action_name = "processFilesPlan",
+      label = "Process Files Plan",
+      max_tokens = 950,
+      success_seconds = 3.5,
+      handle_success = function(text, payloadContext, profile)
+        local taskDescription = payloadContext.clipboard ~= ""
+          and ("Process the selected files based on these instructions: " .. payloadContext.clipboard)
+          or "Process the selected files safely."
+        local savedScript = maybeSavePlanScript(
+          "processFilesPlan",
+          "Process Files Plan",
+          taskDescription,
+          payloadContext,
+          profile,
+          text,
+          "python"
+        )
+
+        if savedScript and not savedScript.ok then
+          return savedScript
+        end
+
+        local lines = {
+          string.format("Process-files plan copied to clipboard using %s.", profile.label),
+        }
+        if savedScript and savedScript.ok then
+          table.insert(lines, "Script: " .. savedScript.code_path)
+          table.insert(lines, "Note: " .. savedScript.note_path)
+        end
+
+        local preview = previewText(text, 110)
+        if preview ~= "" then
+          table.insert(lines, preview)
+        end
+
+        return {
+          ok = true,
+          message = table.concat(lines, "\n"),
+          clipboard_text = text,
+        }
+      end,
+    })
+  end
+
+  function self.explainThisFolder()
+    runClipboardAction({
+      action_name = "explainThisFolder",
+      label = "Explain This Folder",
+      max_tokens = 520,
+      success_seconds = 3,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Folder explanation copied to clipboard using %s.", profile.label)
+        local preview = previewText(text, 110)
+        if preview ~= "" then
+          message = message .. "\n" .. preview
+        end
+
+        return {
+          ok = true,
+          message = message,
+          clipboard_text = text,
+        }
+      end,
+    })
+  end
+
+  function self.generateCommand()
+    runClipboardAction({
+      action_name = "generateCommand",
+      label = "Generate Command",
+      max_tokens = 520,
+      success_seconds = 3,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Command copied to clipboard using %s.", profile.label)
         local preview = previewText(text, 110)
         if preview ~= "" then
           message = message .. "\n" .. preview

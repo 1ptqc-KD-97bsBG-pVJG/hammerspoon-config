@@ -293,6 +293,86 @@ function M.new(config)
     }
   end
 
+  function self.buildRenameFilesPlanPrompt(context)
+    return {
+      system = table.concat({
+        "Create a safe batch file-renaming plan from the Finder selection.",
+        "Return plain text only.",
+        "Use this exact structure:",
+        "Preview:",
+        "old name -> new name",
+        "Optional: if the intent is specific enough, add a section named Script: followed by one fenced code block.",
+        "Do not execute anything.",
+        "Do not return JSON.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nBuild the rename plan using the Finder selection and optional clipboard instructions.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
+  function self.buildProcessFilesPlanPrompt(context)
+    return {
+      system = table.concat({
+        "Create a short file-processing plan from the Finder selection.",
+        "Return plain text only.",
+        "Use this exact structure:",
+        "Plan:",
+        "- step",
+        "Optional: if the intent is specific enough, add a section named Script: followed by one fenced code block.",
+        "Do not execute anything.",
+        "Do not return JSON.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nBuild the file-processing plan using the Finder selection and optional clipboard instructions.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
+  function self.buildExplainThisFolderPrompt(context)
+    return {
+      system = table.concat({
+        "Explain what the selected files or folders appear to be.",
+        "Return plain text only.",
+        "Use these exact headings:",
+        "What it looks like",
+        "Suggested next actions",
+        "Do not return JSON.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nExplain the Finder selection using the available context below.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
+  function self.buildGenerateCommandPrompt(context)
+    return {
+      system = table.concat({
+        "Generate one command or short shell snippet for the selected files and optional clipboard instructions.",
+        "Return plain text only.",
+        "Use this exact structure:",
+        "Command:",
+        "```bash",
+        "command here",
+        "```",
+        "Explanation: one sentence",
+        "Do not execute anything.",
+        "Do not return JSON.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nGenerate the command using the Finder selection and optional clipboard instructions.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
   return self
 end
 

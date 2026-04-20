@@ -36,4 +36,28 @@ local titlePackPrompt = prompts.buildTitlePackPrompt(sampleContext)
 assertTrue(titlePackPrompt.system:find("Title options:", 1, true) ~= nil, "title-pack prompt should require title options heading")
 assertTrue(titlePackPrompt.system:find("Slug: one-line-kebab-case", 1, true) ~= nil, "title-pack prompt should require a slug line")
 
+local folderContext = {
+  app = "Finder",
+  window_title = "Project Files",
+  captured_at = "2026-04-18T12:00:00Z",
+  clipboard = "Rename these files by date and slug.",
+  finder_selection = {
+    "/tmp/a.txt",
+    "/tmp/b.txt",
+  },
+}
+
+local renamePlanPrompt = prompts.buildRenameFilesPlanPrompt(folderContext)
+assertTrue(renamePlanPrompt.system:find("Preview:", 1, true) ~= nil, "rename-files prompt should require a preview section")
+
+local processPlanPrompt = prompts.buildProcessFilesPlanPrompt(folderContext)
+assertTrue(processPlanPrompt.system:find("Plan:", 1, true) ~= nil, "process-files prompt should require a plan section")
+
+local explainFolderPrompt = prompts.buildExplainThisFolderPrompt(folderContext)
+assertTrue(explainFolderPrompt.system:find("What it looks like", 1, true) ~= nil, "explain-folder prompt should require the first heading")
+
+local commandPrompt = prompts.buildGenerateCommandPrompt(folderContext)
+assertTrue(commandPrompt.system:find("Command:", 1, true) ~= nil, "generate-command prompt should require a command heading")
+assertTrue(commandPrompt.system:find("Explanation: one sentence", 1, true) ~= nil, "generate-command prompt should require an explanation line")
+
 print("work copilot prompt tests passed")

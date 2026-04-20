@@ -87,4 +87,21 @@ assertTrue(titlePackOptions.include_finder == true, "title-pack should allow fin
 assertTrue(titlePackOptions.force_finder == true, "title-pack finder context should force finder lookup")
 assertTrue(titlePackOptions.include_profile_metadata == true, "title-pack should allow profile metadata in developer mode")
 
+local renamePlanPolicy = policyModule.getActionPolicy("renameFilesPlan")
+assertEqual(renamePlanPolicy.label, "Rename Files Plan", "rename-files-plan policy should be discoverable")
+assertTrue(renamePlanPolicy.requires_finder == true, "rename-files-plan should require Finder context")
+assertTrue(renamePlanPolicy.menu_only == true, "rename-files-plan should be menu-only")
+
+local processPlanOptions = policyModule.resolveContextOptions("processFilesPlan", {
+  include_profile_metadata = true,
+})
+assertTrue(processPlanOptions.include_finder == true, "process-files-plan should include Finder context by default")
+assertTrue(processPlanOptions.force_finder == true, "process-files-plan should force Finder lookup")
+assertTrue(processPlanOptions.include_clipboard == true, "process-files-plan should include clipboard instructions by default")
+assertTrue(processPlanOptions.include_profile_metadata == true, "process-files-plan should allow profile metadata in developer mode")
+
+local commandPolicy = policyModule.getActionPolicy("generateCommand")
+assertTrue(commandPolicy.requires_finder == true, "generate-command should require Finder selection")
+assertTrue(commandPolicy.hotkey_enabled == false, "generate-command should not register a default hotkey")
+
 print("action policy tests passed")

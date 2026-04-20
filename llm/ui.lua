@@ -116,6 +116,11 @@ function M.new(config, actions, status)
       { title = "Turn Into Action Items", fn = actions.turnIntoActionItems },
       { title = "Reply Draft", fn = actions.replyDraft },
       { title = "Title Pack", fn = actions.titlePack },
+      { title = "-" },
+      { title = "Rename Files Plan", fn = actions.renameFilesPlan },
+      { title = "Process Files Plan", fn = actions.processFilesPlan },
+      { title = "Explain This Folder", fn = actions.explainThisFolder },
+      { title = "Generate Command", fn = actions.generateCommand },
       { title = "Draft Utility Script", fn = actions.draftUtilityScript },
       { title = "-" },
       { title = "Use GLM Clipboard Profile", checked = snapshot.active_clipboard_profile == "glm", fn = function()
