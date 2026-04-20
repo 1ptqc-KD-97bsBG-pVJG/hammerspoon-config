@@ -202,6 +202,97 @@ function M.new(config)
     return table.concat(lines, "\n")
   end
 
+  function self.buildCleanUpDraftPrompt(context)
+    return {
+      system = table.concat({
+        "Polish the clipboard text for clarity and flow.",
+        "Preserve the original intent and material points.",
+        "Return only the cleaned-up draft in plain text.",
+        "Do not return JSON.",
+        "Do not include notes, commentary, bullets, labels, or headings unless they are already necessary in the draft.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nClean up only the clipboard content between the tags below.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
+  function self.buildTurnIntoBulletsPrompt(context)
+    return {
+      system = table.concat({
+        "Turn the clipboard text into crisp bullets.",
+        "Return only 3 to 7 bullet lines.",
+        "Each line must begin with '- '.",
+        "Keep the important points and remove fluff.",
+        "Do not return JSON or any commentary.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nConvert only the clipboard content between the tags below into concise bullets.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
+  function self.buildTurnIntoActionItemsPrompt(context)
+    return {
+      system = table.concat({
+        "Turn the clipboard text into concrete next steps.",
+        "Return only 2 to 7 action-item lines.",
+        "Each line must begin with '- '.",
+        "Write each item as a clear imperative action.",
+        "Do not return JSON or any commentary.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nTurn only the clipboard content between the tags below into action items.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
+  function self.buildReplyDraftPrompt(context)
+    return {
+      system = table.concat({
+        "Draft a concise reply based on the clipboard text.",
+        "Return only the reply in plain text.",
+        "Make it sendable and natural.",
+        "Do not return JSON.",
+        "Do not include notes, labels, subject lines, or commentary unless they are explicitly needed in the reply.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nDraft a reply using only the clipboard content between the tags below.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
+  function self.buildTitlePackPrompt(context)
+    return {
+      system = table.concat({
+        "Generate a compact title pack from the clipboard text.",
+        "Return plain text only.",
+        "Use this exact format:",
+        "Title options:",
+        "- option 1",
+        "- option 2",
+        "- option 3",
+        "Subject: one line",
+        "Slug: one-line-kebab-case",
+        "Do not return JSON.",
+        "Do not add any extra sections or commentary.",
+      }, "\n"),
+      user = string.format(
+        "Context metadata:\n%s\n\nGenerate the title pack using only the clipboard content between the tags below.\n\n%s",
+        renderContext(context),
+        renderClipboardBlock(context)
+      ),
+    }
+  end
+
   return self
 end
 

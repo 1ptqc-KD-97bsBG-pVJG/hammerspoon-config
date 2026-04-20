@@ -66,4 +66,25 @@ assertTrue(webuiOptions.include_finder == true, "WebUI handoff should include Fi
 assertTrue(webuiOptions.include_profile_metadata == true, "WebUI handoff should include profile metadata by default")
 assertTrue(webuiOptions.allow_full_clipboard == true, "WebUI handoff should allow full clipboard by default")
 
+local bulletsPolicy = policyModule.getActionPolicy("turnIntoBullets")
+assertEqual(bulletsPolicy.label, "Turn Into Bullets", "turn-into-bullets policy should be discoverable")
+assertTrue(bulletsPolicy.menu_only == true, "turn-into-bullets should be menu-only in this slice")
+assertTrue(bulletsPolicy.hotkey_enabled == false, "turn-into-bullets should not have a default hotkey")
+
+local replyDraftOptions = policyModule.resolveContextOptions("replyDraft", {
+  include_browser = true,
+  include_profile_metadata = true,
+})
+assertTrue(replyDraftOptions.include_browser == true, "reply-draft should allow browser context in developer mode")
+assertTrue(replyDraftOptions.include_profile_metadata == true, "reply-draft should allow profile metadata in developer mode")
+assertTrue(replyDraftOptions.include_finder == false, "reply-draft should not include finder context by default")
+
+local titlePackOptions = policyModule.resolveContextOptions("titlePack", {
+  include_finder = true,
+  include_profile_metadata = true,
+})
+assertTrue(titlePackOptions.include_finder == true, "title-pack should allow finder context")
+assertTrue(titlePackOptions.force_finder == true, "title-pack finder context should force finder lookup")
+assertTrue(titlePackOptions.include_profile_metadata == true, "title-pack should allow profile metadata in developer mode")
+
 print("action policy tests passed")

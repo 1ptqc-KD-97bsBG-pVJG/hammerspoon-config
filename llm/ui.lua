@@ -110,6 +110,12 @@ function M.new(config, actions, status)
       { title = "Summarize Clipboard", fn = actions.summarizeClipboard },
       { title = "Explain Clipboard Error", fn = actions.explainClipboardError },
       { title = "Rewrite Clipboard Tersely", fn = actions.rewriteClipboardTersely },
+      { title = "-" },
+      { title = "Clean Up Draft", fn = actions.cleanUpDraft },
+      { title = "Turn Into Bullets", fn = actions.turnIntoBullets },
+      { title = "Turn Into Action Items", fn = actions.turnIntoActionItems },
+      { title = "Reply Draft", fn = actions.replyDraft },
+      { title = "Title Pack", fn = actions.titlePack },
       { title = "Draft Utility Script", fn = actions.draftUtilityScript },
       { title = "-" },
       { title = "Use GLM Clipboard Profile", checked = snapshot.active_clipboard_profile == "glm", fn = function()

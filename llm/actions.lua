@@ -457,6 +457,159 @@ function M.new(deps)
     return table.concat(lines, "\n")
   end
 
+  local function collectMeaningfulLines(text)
+    local lines = {}
+    for line in tostring(text or ""):gmatch("[^\n]+") do
+      local cleaned = trim(line)
+      if cleaned ~= "" then
+        table.insert(lines, cleaned)
+      end
+    end
+    return lines
+  end
+
+  local function normalizeBulletList(text, minimum, maximum)
+    local lines = {}
+    for _, line in ipairs(collectMeaningfulLines(text)) do
+      local cleaned = line
+        :gsub("^[-*•]%s*", "")
+        :gsub("^%d+[.)]%s*", "")
+      if cleaned ~= "" then
+        table.insert(lines, "- " .. cleaned)
+      end
+    end
+
+    if #lines < minimum or #lines > maximum then
+      return nil
+    end
+
+    return table.concat(lines, "\n")
+  end
+
+  local function looksLikeParagraph(text)
+    local lines = collectMeaningfulLines(text)
+    return #lines <= 2 and collapseWhitespace(text):find("%.%s+") ~= nil
+  end
+
+  local function normalizeActionItems(text)
+    local normalized = normalizeBulletList(text, 2, 7)
+    if not normalized then
+      return nil
+    end
+
+    local disallowedStarts = {
+      ["is "] = true,
+      ["are "] = true,
+      ["was "] = true,
+      ["were "] = true,
+      ["there is "] = true,
+      ["there are "] = true,
+    }
+
+    for line in normalized:gmatch("[^\n]+") do
+      local body = trim((line:gsub("^%- %s*", ""))):lower()
+      for prefix in pairs(disallowedStarts) do
+        if body:find("^" .. prefix) then
+          return nil
+        end
+      end
+    end
+
+    return normalized
+  end
+
+  local function normalizeCleanUpDraft(text)
+    local output = sanitizeModelText(text)
+    if output == "" then
+      return nil
+    end
+    if startsLikeJson(output) or looksLikeReasoningLeak(output) then
+      return nil
+    end
+    if output:match("^Title options:") then
+      return nil
+    end
+    if normalizeBulletList(output, 2, 12) and not looksLikeParagraph(output) then
+      return nil
+    end
+    return output
+  end
+
+  local function normalizeReplyDraft(text)
+    local output = sanitizeModelText(text)
+    if output == "" then
+      return nil
+    end
+    if startsLikeJson(output) or looksLikeReasoningLeak(output) then
+      return nil
+    end
+    if output:lower():find("^subject:", 1, true) then
+      return nil
+    end
+    if normalizeBulletList(output, 2, 12) and not looksLikeParagraph(output) then
+      return nil
+    end
+    return output
+  end
+
+  local function normalizeTitlePack(text)
+    local output = sanitizeModelText(text)
+    if output == "" then
+      return nil
+    end
+    if startsLikeJson(output) or looksLikeReasoningLeak(output) then
+      return nil
+    end
+
+    local lines = collectMeaningfulLines(output)
+    if #lines < 6 then
+      return nil
+    end
+
+    if lines[1] ~= "Title options:" then
+      return nil
+    end
+
+    local bullets = {}
+    local subjectLine = nil
+    local slugLine = nil
+
+    for i = 2, #lines do
+      local line = lines[i]
+      if #bullets < 3 then
+        if not line:find("^%- ", 1, true) then
+          return nil
+        end
+        table.insert(bullets, line)
+      elseif not subjectLine then
+        if not line:find("^Subject:%s*.+") then
+          return nil
+        end
+        subjectLine = line
+      elseif not slugLine then
+        if not line:find("^Slug:%s*[%w%-]+$") then
+          return nil
+        end
+        slugLine = line
+      else
+        return nil
+      end
+    end
+
+    if #bullets ~= 3 or not subjectLine or not slugLine then
+      return nil
+    end
+
+    return table.concat({
+      "Title options:",
+      bullets[1],
+      bullets[2],
+      bullets[3],
+      subjectLine,
+      slugLine,
+    }, "\n")
+  end
+
   local function isBadRewrite(inputText, outputText)
     local output = sanitizeModelText(outputText)
     if output == "" then
@@ -551,6 +704,46 @@ function M.new(deps)
         return nil, reason
       end
       return normalizeErrorExplainText(output), nil
+    end
+
+    if validatorName == "cleanup_draft" then
+      local normalized = normalizeCleanUpDraft(output)
+      if not normalized then
+        return nil, "invalid_cleanup_draft"
+      end
+      return normalized, nil
+    end
+
+    if validatorName == "bullets" then
+      local normalized = normalizeBulletList(output, 3, 7)
+      if not normalized then
+        return nil, "invalid_bullets"
+      end
+      return normalized, nil
+    end
+
+    if validatorName == "action_items" then
+      local normalized = normalizeActionItems(output)
+      if not normalized then
+        return nil, "invalid_action_items"
+      end
+      return normalized, nil
+    end
+
+    if validatorName == "reply_draft" then
+      local normalized = normalizeReplyDraft(output)
+      if not normalized then
+        return nil, "invalid_reply_draft"
+      end
+      return normalized, nil
+    end
+
+    if validatorName == "title_pack" then
+      local normalized = normalizeTitlePack(output)
+      if not normalized then
+        return nil, "invalid_title_pack"
+      end
+      return normalized, nil
     end
 
     return output, nil
@@ -1148,6 +1341,136 @@ function M.new(deps)
             string.format("Summary saved using %s.", profile.label),
             "Path: " .. saved.data.path,
           }, "\n"),
+          clipboard_text = text,
+        }
+      end,
+    })
+  end
+
+  function self.cleanUpDraft()
+    runClipboardAction({
+      action_name = "cleanUpDraft",
+      label = "Clean Up Draft",
+      max_tokens = 700,
+      success_seconds = 3,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Cleaned-up draft copied to clipboard using %s.", profile.label)
+        if payloadContext.truncated then
+          message = message .. " Input was truncated."
+        end
+
+        local preview = previewText(text, 110)
+        if preview ~= "" then
+          message = message .. "\n" .. preview
+        end
+
+        return {
+          ok = true,
+          message = message,
+          clipboard_text = text,
+        }
+      end,
+    })
+  end
+
+  function self.turnIntoBullets()
+    runClipboardAction({
+      action_name = "turnIntoBullets",
+      label = "Turn Into Bullets",
+      max_tokens = 320,
+      success_seconds = 3,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Bullet list copied to clipboard using %s.", profile.label)
+        if payloadContext.truncated then
+          message = message .. " Input was truncated."
+        end
+
+        local preview = previewText(text, 110)
+        if preview ~= "" then
+          message = message .. "\n" .. preview
+        end
+
+        return {
+          ok = true,
+          message = message,
+          clipboard_text = text,
+        }
+      end,
+    })
+  end
+
+  function self.turnIntoActionItems()
+    runClipboardAction({
+      action_name = "turnIntoActionItems",
+      label = "Turn Into Action Items",
+      max_tokens = 360,
+      success_seconds = 3,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Action items copied to clipboard using %s.", profile.label)
+        if payloadContext.truncated then
+          message = message .. " Input was truncated."
+        end
+
+        local preview = previewText(text, 110)
+        if preview ~= "" then
+          message = message .. "\n" .. preview
+        end
+
+        return {
+          ok = true,
+          message = message,
+          clipboard_text = text,
+        }
+      end,
+    })
+  end
+
+  function self.replyDraft()
+    runClipboardAction({
+      action_name = "replyDraft",
+      label = "Reply Draft",
+      max_tokens = 420,
+      success_seconds = 3,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Reply draft copied to clipboard using %s.", profile.label)
+        if payloadContext.truncated then
+          message = message .. " Input was truncated."
+        end
+
+        local preview = previewText(text, 110)
+        if preview ~= "" then
+          message = message .. "\n" .. preview
+        end
+
+        return {
+          ok = true,
+          message = message,
+          clipboard_text = text,
+        }
+      end,
+    })
+  end
+
+  function self.titlePack()
+    runClipboardAction({
+      action_name = "titlePack",
+      label = "Title Pack",
+      max_tokens = 280,
+      success_seconds = 3,
+      handle_success = function(text, payloadContext, profile)
+        local message = string.format("Title pack copied to clipboard using %s.", profile.label)
+        if payloadContext.truncated then
+          message = message .. " Input was truncated."
+        end
+
+        local preview = previewText(text, 110)
+        if preview ~= "" then
+          message = message .. "\n" .. preview
+        end
+
+        return {
+          ok = true,
+          message = message,
           clipboard_text = text,
         }
       end,
